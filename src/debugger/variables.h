@@ -16,9 +16,72 @@ namespace netcoredbg
 
 class Evaluator;
 class EvalHelpers;
+class EvalWaiter;
+class EvalStackMachine;
 
 class Variables
 {
+public:
+
+    Variables(std::shared_ptr<EvalHelpers> &sharedEvalHelpers,
+              std::shared_ptr<Evaluator> &sharedEvaluator,
+              std::shared_ptr<EvalStackMachine> &sharedEvalStackMachine) :
+        m_sharedEvalHelpers(sharedEvalHelpers),
+        m_sharedEvaluator(sharedEvaluator),
+        m_sharedEvalStackMachine(sharedEvalStackMachine)
+    {}
+
+    int GetNamedVariables(uint32_t variablesReference);
+
+    HRESULT GetVariables(
+        ICorDebugProcess *pProcess,
+        uint32_t variablesReference,
+        VariablesFilter filter,
+        int start,
+        int count,
+        std::vector<Variable> &variables);
+
+    HRESULT SetVariable(
+        ICorDebugProcess *pProcess,
+        const std::string &name,
+        const std::string &value,
+        uint32_t ref,
+        std::string &output);
+
+    HRESULT SetExpression(
+        ICorDebugProcess *pProcess,
+        FrameId frameId,
+        const std::string &expression,
+        int evalFlags,
+        const std::string &value,
+        std::string &output);
+
+    HRESULT GetScopes(
+        ICorDebugProcess *pProcess,
+        FrameId frameId,
+        std::vector<Scope> &scopes);
+
+    HRESULT Evaluate(
+        ICorDebugProcess *pProcess,
+        FrameId frameId,
+        const std::string &expression,
+        Variable &variable,
+        std::string &output);
+
+    HRESULT GetExceptionVariable(
+        FrameId frameId,
+        ICorDebugThread *pThread,
+        Variable &variable);
+
+    void Clear()
+    {
+        m_referencesMutex.lock();
+        m_references.clear();
+        m_referencesMutex.unlock();
+    }
+
+private:
+
     enum ValueKind
     {
         ValueIsScope,
@@ -68,7 +131,7 @@ class Variables
 
     std::shared_ptr<EvalHelpers> m_sharedEvalHelpers;
     std::shared_ptr<Evaluator> m_sharedEvaluator;
-    struct Member;
+    std::shared_ptr<EvalStackMachine> m_sharedEvalStackMachine;
 
     std::recursive_mutex m_referencesMutex;
     std::unordered_map<uint32_t, VariableReference> m_references;
@@ -89,24 +152,6 @@ class Variables
         int count,
         std::vector<Variable> &variables);
 
-    static void FixupInheritedFieldNames(std::vector<Member> &members);
-
-    HRESULT FetchFieldsAndProperties(
-        ICorDebugValue *pInputValue,
-        ICorDebugThread *pThread,
-        FrameLevel frameLevel,
-        std::vector<Member> &members,
-        bool fetchOnlyStatic,
-        bool &hasStaticMembers,
-        int childStart,
-        int childEnd,
-        int evalFlags);
-
-    void GetNumChild(
-        ICorDebugValue *pValue,
-        int &numChild,
-        bool static_members = false);
-
     HRESULT SetStackVariable(
         VariableReference &ref,
         ICorDebugThread *pThread,
@@ -120,69 +165,6 @@ class Variables
         const std::string &name,
         const std::string &value,
         std::string &output);
-
-    void FillValueAndType(Member &member, Variable &var, bool escape = true);
-
-public:
-
-    Variables(std::shared_ptr<EvalHelpers> &sharedEvalHelpers, std::shared_ptr<Evaluator> &sharedEvaluator) :
-        m_sharedEvalHelpers(sharedEvalHelpers),
-        m_sharedEvaluator(sharedEvaluator)
-    {}
-
-    int GetNamedVariables(uint32_t variablesReference);
-
-    HRESULT GetVariables(
-        ICorDebugProcess *pProcess,
-        uint32_t variablesReference,
-        VariablesFilter filter,
-        int start,
-        int count,
-        std::vector<Variable> &variables);
-
-    HRESULT SetVariable(
-        ICorDebugProcess *pProcess,
-        const std::string &name,
-        const std::string &value,
-        uint32_t ref,
-        std::string &output);
-
-    HRESULT SetVariable(
-        ICorDebugProcess *pProcess,
-        ICorDebugValue *pVariable,
-        const std::string &value,
-        FrameId frameId,
-        std::string &output);
-
-    HRESULT GetScopes(
-        ICorDebugProcess *pProcess,
-        FrameId frameId,
-        std::vector<Scope> &scopes);
-
-    HRESULT Evaluate(
-        ICorDebugProcess *pProcess,
-        FrameId frameId,
-        const std::string &expression,
-        Variable &variable,
-        std::string &output);
-
-    HRESULT GetValueByExpression(
-        ICorDebugProcess *pProcess,
-        FrameId frameId,
-        const Variable &variable,
-        ICorDebugValue **ppResult);
-
-    HRESULT GetExceptionVariable(
-        FrameId frameId,
-        ICorDebugThread *pThread,
-        Variable &variable);
-
-    void Clear()
-    {
-        m_referencesMutex.lock();
-        m_references.clear();
-        m_referencesMutex.unlock();
-    }
 
 };
 

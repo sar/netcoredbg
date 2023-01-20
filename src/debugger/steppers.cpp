@@ -6,7 +6,7 @@
 #include "debugger/stepper_simple.h"
 #include "debugger/stepper_async.h"
 #include "debugger/steppers.h"
-#include "metadata/modules.h"
+#include "metadata/attributes.h"
 #include "utils/utf.h"
 
 namespace netcoredbg
@@ -67,6 +67,7 @@ static const std::unordered_set<WSTRING> g_operatorMethodNames
 HRESULT Steppers::SetupStep(ICorDebugThread *pThread, IDebugger::StepType stepType)
 {
     HRESULT Status;
+    m_filteredPrevStep = false;
 
     ToRelease<ICorDebugProcess> pProcess;
     IfFailRet(pThread->GetProcess(&pProcess));
@@ -115,9 +116,7 @@ HRESULT Steppers::ManagedCallbackStepComplete(ICorDebugThread *pThread, CorDebug
     ToRelease<IMetaDataImport> iMD;
     IfFailRet(iUnknown->QueryInterface(IID_IMetaDataImport, (LPVOID*) &iMD));
 
-    // https://docs.microsoft.com/en-us/visualstudio/debugger/navigating-through-code-with-the-debugger?view=vs-2019#BKMK_Step_into_properties_and_operators_in_managed_code
-    // The debugger steps over properties and operators in managed code by default. In most cases, this provides a better debugging experience.
-    if (m_stepFiltering)
+    auto methodShouldBeFltered = [&]() -> bool
     {
         ULONG nameLen;
         WCHAR szFunctionName[mdNameLen] = {0};
@@ -125,10 +124,7 @@ HRESULT Steppers::ManagedCallbackStepComplete(ICorDebugThread *pThread, CorDebug
                                           &nameLen, nullptr, nullptr, nullptr, nullptr, nullptr)))
         {
             if (g_operatorMethodNames.find(szFunctionName) != g_operatorMethodNames.end())
-            {
-                IfFailRet(m_simpleStepper->SetupStep(pThread, IDebugger::StepType::STEP_OUT));
-                return S_OK;
-            }
+                return true;
         }
 
         mdProperty propertyDef;
@@ -145,32 +141,53 @@ HRESULT Steppers::ManagedCallbackStepComplete(ICorDebugThread *pThread, CorDebug
                     continue;
 
                 iMD->CloseEnum(propEnum);
-                IfFailRet(m_simpleStepper->SetupStep(pThread, IDebugger::StepType::STEP_OUT));
-                return S_OK;
+                return true;
             }
         }
         iMD->CloseEnum(propEnum);
+
+        return false;
+    };
+
+    // https://docs.microsoft.com/en-us/visualstudio/debugger/navigating-through-code-with-the-debugger?view=vs-2019#BKMK_Step_into_properties_and_operators_in_managed_code
+    // The debugger steps over properties and operators in managed code by default. In most cases, this provides a better debugging experience.
+    if (m_stepFiltering && methodShouldBeFltered())
+    {
+        IfFailRet(m_simpleStepper->SetupStep(pThread, IDebugger::StepType::STEP_OUT));
+        m_filteredPrevStep = true;
+        return S_OK;
     }
 
+    bool filteredPrevStep = m_filteredPrevStep;
+    m_filteredPrevStep = false;
+
     // Same behaviour as MS vsdbg and MSVS C# debugger have - step only for code with PDB loaded (no matter JMC enabled or not by user).
-    ULONG32 ipOffset;
-    ULONG32 ilCloseUserCodeOffset;
+    ULONG32 ipOffset = 0;
+    ULONG32 ilNextUserCodeOffset = 0;
     bool noUserCodeFound = false; // Must be initialized with `false`, since GetFrameILAndNextUserCodeILOffset call could be failed before delegate call.
-    if (SUCCEEDED(Status = m_sharedModules->GetFrameILAndNextUserCodeILOffset(iCorFrame, ipOffset, ilCloseUserCodeOffset, &noUserCodeFound)))
+    if (SUCCEEDED(Status = m_sharedModules->GetFrameILAndNextUserCodeILOffset(iCorFrame, ipOffset, ilNextUserCodeOffset, &noUserCodeFound)))
     {
-        // Current IL offset less than IL offset of next close user code line, or that was step-out.
-        if (ipOffset < ilCloseUserCodeOffset || reason == CorDebugStepReason::STEP_RETURN)
+        // Current IL offset less than IL offset of next close user code line.
+        if (ipOffset < ilNextUserCodeOffset)
         {
             IfFailRet(m_simpleStepper->SetupStep(pThread, IDebugger::StepType::STEP_OVER));
+            return S_OK;
+        }
+        // was return from filtered method
+        else if (reason == CorDebugStepReason::STEP_RETURN && filteredPrevStep)
+        {
+            IfFailRet(m_simpleStepper->SetupStep(pThread, IDebugger::StepType::STEP_IN));
             return S_OK;
         }
     }
     else if (noUserCodeFound)
     {
         IfFailRet(m_simpleStepper->SetupStep(pThread, IDebugger::StepType::STEP_IN));
+        // In case step-in will return from method and no user code was called in user module, step-in again.
+        m_filteredPrevStep = true;
         return S_OK;
     }
-    else // Note, in case JMC enabled ManagedCallbackStepComplete() called only for user code.
+    else // Note, in case JMC enabled step, ManagedCallbackStepComplete() called only for user module code.
         return Status;
 
     // Care about attributes for "JMC disabled" case.
@@ -181,6 +198,10 @@ HRESULT Steppers::ManagedCallbackStepComplete(ICorDebugThread *pThread, CorDebug
         if (HasAttribute(iMD, typeDef, DebuggerAttribute::StepThrough) || HasAttribute(iMD, methodDef, attrNames))
         {
             IfFailRet(m_simpleStepper->SetupStep(pThread, IDebugger::StepType::STEP_IN));
+            // In case step-in will return from filtered method and no user code was called, step-in again.
+            if (!m_stepFiltering && methodShouldBeFltered())
+                 m_filteredPrevStep = true;
+
             return S_OK;
         }
     }
@@ -197,6 +218,14 @@ HRESULT Steppers::DisableAllSteppers(ICorDebugProcess *pProcess)
     HRESULT Status;
     IfFailRet(m_simpleStepper->DisableAllSteppers(pProcess));
     return m_asyncStepper->DisableAllSteppers();
+}
+
+HRESULT Steppers::DisableAllSteppers(ICorDebugAppDomain *pAppDomain)
+{
+    HRESULT Status;
+    ToRelease<ICorDebugProcess> iCorProcess;
+    IfFailRet(pAppDomain->GetProcess(&iCorProcess));
+    return DisableAllSteppers(iCorProcess);
 }
 
 HRESULT Steppers::DisableAllSimpleSteppers(ICorDebugProcess *pProcess)

@@ -27,6 +27,11 @@ $ALL_TEST_NAMES = @(
     "MITestNoJMCBreakpoint"
     "MITestNoJMCAsyncStepping"
     "MITestNoJMCExceptionBreakpoint"
+    "MITestSizeof"
+    "MITestAsyncLambdaEvaluate"
+    "MITestGeneric"
+    "MITestEvalArraysIndexers"
+    "MITestBreakpointWithoutStop"
     "VSCodeExampleTest"
     "VSCodeTestBreakpoint"
     "VSCodeTestFuncBreak"
@@ -47,6 +52,11 @@ $ALL_TEST_NAMES = @(
     "VSCodeTestNoJMCAsyncStepping"
     "VSCodeTestExceptionBreakpoint"
     "VSCodeTestNoJMCExceptionBreakpoint"
+    "VSCodeTestSizeof"
+    "VSCodeTestAsyncLambdaEvaluate"
+    "VSCodeTestGeneric"
+    "VSCodeTestEvalArraysIndexers"
+    "VSCodeTestBreakpointWithoutStop"
 )
 
 # Skipped tests:

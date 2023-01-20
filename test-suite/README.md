@@ -1,3 +1,7 @@
+# Prerequisites
+
+Netcoredbg test suite requires **.NET SDK version 3.1**, you can download it manually from here: https://dotnet.microsoft.com/en-us/download/dotnet/3.1
+
 # How to launch MIExampleTest for tcp netcoredbg server
 
 - launch target and install netcoredbg;
@@ -85,13 +89,6 @@ to make all necessary steps.
     $ powershell.exe -executionpolicy bypass -File run_tests.ps1 <test-name> [<test-name>]
 ```
 
-- Xunit tests:
-```
-    $ cd XunitTests
-    $ dotnet test
-```
-
-
 # How to add new test
 
 - move to test-suite directory;
@@ -112,13 +109,5 @@ to make all necessary steps.
 ```
 
 - add test name into ALL_TEST_NAMES list in "run_tests.sh", "run_tests.ps1", "sdb_run_tests.sh" and "sdb_run_tests.ps1" scripts;
-
-- add reference to NewTest project in Xunit tests:
-```
-    $ cd XunitTests
-    $ dotnet add reference ../NewTest/NewTest.csproj
-```
-
-- add attribute `[InlineData("NewTest")]` in xunit test class before method `Run()`;
 
 - in MIExampleTest implemented small scenario of NetCoreDbgTest library using.

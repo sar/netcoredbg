@@ -212,12 +212,12 @@ HRESULT ExceptionBreakpoints::GetExceptionDetails(ICorDebugThread *pThread, ICor
     HRESULT Status;
     ToRelease<ICorDebugValue> iCorInnerExceptionValue;
     const bool escape = false;
-    m_sharedEvaluator->WalkMembers(pExceptionValue, pThread, FrameLevel{0}, [&](
+    m_sharedEvaluator->WalkMembers(pExceptionValue, pThread, FrameLevel{0}, false, [&](
         ICorDebugType*,
         bool,
         const std::string &memberName,
         Evaluator::GetValueCallback getValue,
-        Evaluator::SetValueCallback)
+        Evaluator::SetterData*)
     {
         auto getMemberWithName = [&](const std::string &name, std::string &result) -> HRESULT
         {
@@ -389,8 +389,6 @@ HRESULT ExceptionBreakpoints::ManagedCallbackException(ICorDebugThread *pThread,
     {
         case ExceptionCallbackType::FIRST_CHANCE:
         {
-            assert(m_threadsExceptionStatus.find(tid) == m_threadsExceptionStatus.end());
-
             // Important, reset previous stage for this thread.
             m_threadsExceptionBreakMode[tid] = ExceptionBreakMode::NEVER;
 
@@ -491,12 +489,12 @@ HRESULT ExceptionBreakpoints::ManagedCallbackException(ICorDebugThread *pThread,
     // Note, this is optional field in exception object that could have nulled reference.
     std::string excMessage;
     const bool escape = false;
-    m_sharedEvaluator->WalkMembers(iCorExceptionValue, pThread, FrameLevel{0}, [&](
+    m_sharedEvaluator->WalkMembers(iCorExceptionValue, pThread, FrameLevel{0}, false, [&](
         ICorDebugType*,
         bool,
         const std::string &memberName,
         Evaluator::GetValueCallback getValue,
-        Evaluator::SetValueCallback)
+        Evaluator::SetterData*)
     {
         ToRelease<ICorDebugValue> pResultValue;
 
@@ -539,6 +537,37 @@ HRESULT ExceptionBreakpoints::ManagedCallbackExitThread(ICorDebugThread *pThread
     m_threadsExceptionMutex.unlock();
 
     return S_OK;
+}
+
+void ExceptionBreakpoints::AddAllBreakpointsInfo(std::vector<IDebugger::BreakpointInfo> &list)
+{
+    std::lock_guard<std::mutex> lock(m_breakpointsMutex);
+    static std::vector<std::string>Filters{
+        "throw",
+        "user-unhandled",
+        "throw+user-unhandled",
+        "unhandled"
+    };
+    std::string ss;
+
+    list.reserve(list.size() + m_exceptionBreakpoints.size());
+
+    for (size_t filter = 0; filter < (size_t)ExceptionBreakpointFilter::Size; ++filter)
+    {
+        for (auto it = m_exceptionBreakpoints[filter].begin(); it != m_exceptionBreakpoints[filter].end();)
+        {
+            auto &bp = it->second;
+            ss = Filters[filter];
+            for (auto &entry : bp.condition)
+            {
+                ss += " ";
+                ss += entry;
+            }
+            list.emplace_back(IDebugger::BreakpointInfo{ bp.id, true, true, 0, "",
+                                                     "exception ", 0, 0, "", ss});
+            ++it;
+        }
+    }
 }
 
 } // namespace netcoredbg

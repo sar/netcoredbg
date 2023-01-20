@@ -298,7 +298,7 @@ namespace NetcoreDbgTest.Script
             throw new ResultNotSuccessException(@"__FILE__:__LINE__"+"\n"+caller_trace);
         }
 
-        public void WasExceptionBreakpointHitInExternalCode(string caller_trace, string excCategory, string excMode, string excName)
+        public void WasExceptionBreakpointHitInExternalCode(string caller_trace, string excCategory, string excMode, string excName, string extFrame)
         {
             Func<string, bool> filter = (resJSON) => {
                 if (VSCodeDebugger.isResponseContainProperty(resJSON, "event", "stopped")
@@ -321,7 +321,7 @@ namespace NetcoreDbgTest.Script
             StackTraceResponse stackTraceResponse =
                 JsonConvert.DeserializeObject<StackTraceResponse>(ret.ResponseStr);
 
-            if (stackTraceResponse.body.stackFrames[0].name == "[External Code]")
+            if (stackTraceResponse.body.stackFrames[0].name == extFrame)
             {
                 TestExceptionInfo(@"__FILE__:__LINE__"+"\n"+caller_trace, excCategory, excMode, excName);
                 return;
@@ -449,10 +449,11 @@ namespace VSCodeTestExceptionBreakpoint
     {
         static void Main(string[] args)
         {
-            Label.Checkpoint("init", "test_all", (Object context) => {
+            Label.Checkpoint("init", "test_rethrow", (Object context) => {
                 Context Context = (Context)context;
                 Context.PrepareStart(@"__FILE__:__LINE__");
 
+                Context.AddBreakpoint(@"__FILE__:__LINE__", "bp_test_0");
                 Context.AddBreakpoint(@"__FILE__:__LINE__", "bp_test_1");
                 Context.AddBreakpoint(@"__FILE__:__LINE__", "bp_test_2");
                 Context.AddBreakpoint(@"__FILE__:__LINE__", "bp_test_3");
@@ -472,12 +473,39 @@ namespace VSCodeTestExceptionBreakpoint
                 Context.AddBreakpoint(@"__FILE__:__LINE__", "bp_test_17");
                 Context.SetBreakpoints(@"__FILE__:__LINE__");
 
+                Context.PrepareEnd(@"__FILE__:__LINE__");
+                Context.WasEntryPointHit(@"__FILE__:__LINE__");
+                Context.Continue(@"__FILE__:__LINE__");
+            });
+
+            // test rethrow without any exception breakpoints setup
+
+            try {
+                try {
+                    new System.Exception();
+                } catch {
+                    throw;
+                }
+            } catch {}
+
+            try {
+                try {
+                    new System.Exception();
+                } catch {
+                    new System.NullReferenceException();
+                }
+            } catch {}
+
+            int test_rethrow = 0;                                                                  Label.Breakpoint("bp_test_0");
+
+            Label.Checkpoint("test_rethrow", "test_all", (Object context) => {
+                Context Context = (Context)context;
+                Context.WasBreakpointHit(@"__FILE__:__LINE__", "bp_test_0");
+
                 Context.ResetExceptionBreakpoints();
                 Context.AddExceptionBreakpointFilterAll();
                 Context.SetExceptionBreakpoints(@"__FILE__:__LINE__");
 
-                Context.PrepareEnd(@"__FILE__:__LINE__");
-                Context.WasEntryPointHit(@"__FILE__:__LINE__");
                 Context.Continue(@"__FILE__:__LINE__");
             });
 
@@ -500,11 +528,11 @@ namespace VSCodeTestExceptionBreakpoint
                 Context.Continue(@"__FILE__:__LINE__");
                 Context.WasBreakpointHit(@"__FILE__:__LINE__", "bp_test_2");
                 Context.Continue(@"__FILE__:__LINE__");
-                Context.WasExceptionBreakpointHitInExternalCode(@"__FILE__:__LINE__", "CLR", "always", "System.Exception");
+                Context.WasExceptionBreakpointHitInExternalCode(@"__FILE__:__LINE__", "CLR", "always", "System.Exception", "VSCodeTestExceptionBreakpoint.outside_user_code.throw_Exception()");
                 Context.Continue(@"__FILE__:__LINE__");
                 Context.WasBreakpointHit(@"__FILE__:__LINE__", "bp_test_3");
                 Context.Continue(@"__FILE__:__LINE__");
-                Context.WasExceptionBreakpointHitInExternalCode(@"__FILE__:__LINE__", "CLR", "always", "System.Exception");
+                Context.WasExceptionBreakpointHitInExternalCode(@"__FILE__:__LINE__", "CLR", "always", "System.Exception", "VSCodeTestExceptionBreakpoint.outside_user_code.throw_Exception_with_catch()");
 
                 Context.ResetExceptionBreakpoints();
                 Context.AddExceptionBreakpointFilterAllWithOptions("");
@@ -523,11 +551,11 @@ namespace VSCodeTestExceptionBreakpoint
                 Context.Continue(@"__FILE__:__LINE__");
                 Context.WasBreakpointHit(@"__FILE__:__LINE__", "bp_test_2");
                 Context.Continue(@"__FILE__:__LINE__");
-                Context.WasExceptionBreakpointHitInExternalCode(@"__FILE__:__LINE__", "CLR", "always", "System.Exception");
+                Context.WasExceptionBreakpointHitInExternalCode(@"__FILE__:__LINE__", "CLR", "always", "System.Exception", "VSCodeTestExceptionBreakpoint.outside_user_code.throw_Exception()");
                 Context.Continue(@"__FILE__:__LINE__");
                 Context.WasBreakpointHit(@"__FILE__:__LINE__", "bp_test_3");
                 Context.Continue(@"__FILE__:__LINE__");
-                Context.WasExceptionBreakpointHitInExternalCode(@"__FILE__:__LINE__", "CLR", "always", "System.Exception");
+                Context.WasExceptionBreakpointHitInExternalCode(@"__FILE__:__LINE__", "CLR", "always", "System.Exception", "VSCodeTestExceptionBreakpoint.outside_user_code.throw_Exception_with_catch()");
 
                 Context.ResetExceptionBreakpoints();
                 Context.AddExceptionBreakpointFilterAllWithOptions("System.NullReferenceException");
@@ -558,11 +586,11 @@ namespace VSCodeTestExceptionBreakpoint
                 Context.Continue(@"__FILE__:__LINE__");
                 Context.WasBreakpointHit(@"__FILE__:__LINE__", "bp_test_5");
                 Context.Continue(@"__FILE__:__LINE__");
-                Context.WasExceptionBreakpointHitInExternalCode(@"__FILE__:__LINE__", "CLR", "always", "System.NullReferenceException");
+                Context.WasExceptionBreakpointHitInExternalCode(@"__FILE__:__LINE__", "CLR", "always", "System.NullReferenceException", "VSCodeTestExceptionBreakpoint.outside_user_code.throw_Exception_NullReferenceException_with_catch()");
                 Context.Continue(@"__FILE__:__LINE__");
                 Context.WasBreakpointHit(@"__FILE__:__LINE__", "bp_test_6");
                 Context.Continue(@"__FILE__:__LINE__");
-                Context.WasExceptionBreakpointHitInExternalCode(@"__FILE__:__LINE__", "CLR", "always", "System.NullReferenceException");
+                Context.WasExceptionBreakpointHitInExternalCode(@"__FILE__:__LINE__", "CLR", "always", "System.NullReferenceException", "VSCodeTestExceptionBreakpoint.outside_user_code.throw_NullReferenceException()");
 
                 Context.ResetExceptionBreakpoints();
                 Context.AddExceptionBreakpointFilterAllWithOptions("!System.Exception");
@@ -581,11 +609,11 @@ namespace VSCodeTestExceptionBreakpoint
                 Context.Continue(@"__FILE__:__LINE__");
                 Context.WasBreakpointHit(@"__FILE__:__LINE__", "bp_test_5");
                 Context.Continue(@"__FILE__:__LINE__");
-                Context.WasExceptionBreakpointHitInExternalCode(@"__FILE__:__LINE__", "CLR", "always", "System.NullReferenceException");
+                Context.WasExceptionBreakpointHitInExternalCode(@"__FILE__:__LINE__", "CLR", "always", "System.NullReferenceException", "VSCodeTestExceptionBreakpoint.outside_user_code.throw_Exception_NullReferenceException_with_catch()");
                 Context.Continue(@"__FILE__:__LINE__");
                 Context.WasBreakpointHit(@"__FILE__:__LINE__", "bp_test_6");
                 Context.Continue(@"__FILE__:__LINE__");
-                Context.WasExceptionBreakpointHitInExternalCode(@"__FILE__:__LINE__", "CLR", "always", "System.NullReferenceException");
+                Context.WasExceptionBreakpointHitInExternalCode(@"__FILE__:__LINE__", "CLR", "always", "System.NullReferenceException", "VSCodeTestExceptionBreakpoint.outside_user_code.throw_NullReferenceException()");
 
                 Context.ResetExceptionBreakpoints();
                 Context.AddExceptionBreakpointFilterUserUnhandled();

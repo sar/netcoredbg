@@ -19,22 +19,24 @@
 namespace netcoredbg
 {
 
-class IDebugger;
+class Variables;
 class Modules;
 
 class LineBreakpoints
 {
 public:
 
-    LineBreakpoints(std::shared_ptr<Modules> &sharedModules) :
+    LineBreakpoints(std::shared_ptr<Modules> &sharedModules, std::shared_ptr<Variables> &sharedVariables) :
         m_sharedModules(sharedModules),
+        m_sharedVariables(sharedVariables),
         m_justMyCode(true)
     {}
 
     void SetJustMyCode(bool enable) { m_justMyCode = enable; };
     void DeleteAll();
-    HRESULT SetLineBreakpoints(ICorDebugProcess *pProcess, const std::string &filename, const std::vector<LineBreakpoint> &lineBreakpoints,
+    HRESULT SetLineBreakpoints(bool haveProcess, const std::string &filename, const std::vector<LineBreakpoint> &lineBreakpoints,
                                std::vector<Breakpoint> &breakpoints, std::function<uint32_t()> getId);
+    HRESULT UpdateBreakpointsOnHotReload(ICorDebugModule *pModule, std::unordered_set<mdMethodDef> &methodTokens, std::vector<BreakpointEvent> &events);
     HRESULT AllBreakpointsActivate(bool act);
     HRESULT BreakpointActivate(uint32_t id, bool act);
     void AddAllBreakpointsInfo(std::vector<IDebugger::BreakpointInfo> &list);
@@ -42,7 +44,7 @@ public:
     // Important! Must provide succeeded return code:
     // S_OK - breakpoint hit
     // S_FALSE - no breakpoint hit
-    HRESULT CheckBreakpointHit(IDebugger *debugger, ICorDebugThread *pThread, ICorDebugBreakpoint *pBreakpoint, Breakpoint &breakpoint);
+    HRESULT CheckBreakpointHit(ICorDebugThread *pThread, ICorDebugBreakpoint *pBreakpoint, Breakpoint &breakpoint);
 
     // Important! Callbacks related methods must control return for succeeded return code.
     // Do not allow debugger API return succeeded (uncontrolled) return code.
@@ -53,27 +55,24 @@ public:
     //     return S_OK;
     HRESULT ManagedCallbackLoadModule(ICorDebugModule *pModule, std::vector<BreakpointEvent> &events);
 
-private:
-
-    std::shared_ptr<Modules> m_sharedModules;
-    bool m_justMyCode;
-
     struct ManagedLineBreakpoint
     {
         uint32_t id;
         std::string module;
+        CORDB_ADDRESS modAddress;
         int linenum;
         int endLine;
         bool enabled;
         ULONG32 times;
         std::string condition;
         // In case of code line in constructor, we could resolve multiple methods for breakpoints.
+        // For example, `MyType obj = new MyType(1);` code will be added to all class constructors).
         std::vector<ToRelease<ICorDebugFunctionBreakpoint> > iCorFuncBreakpoints;
 
         bool IsVerified() const { return !iCorFuncBreakpoints.empty(); }
 
         ManagedLineBreakpoint() :
-            id(0), linenum(0), endLine(0), enabled(true), times(0)
+            id(0), modAddress(0), linenum(0), endLine(0), enabled(true), times(0)
         {}
 
         ~ManagedLineBreakpoint()
@@ -89,7 +88,15 @@ private:
 
         ManagedLineBreakpoint(ManagedLineBreakpoint &&that) = default;
         ManagedLineBreakpoint(const ManagedLineBreakpoint &that) = delete;
+        ManagedLineBreakpoint& operator=(ManagedLineBreakpoint &&that) = default;
+        ManagedLineBreakpoint& operator=(const ManagedLineBreakpoint &that) = delete;
     };
+
+private:
+
+    std::shared_ptr<Modules> m_sharedModules;
+    std::shared_ptr<Variables> m_sharedVariables;
+    bool m_justMyCode;
 
     struct ManagedLineBreakpointMapping
     {
@@ -114,9 +121,6 @@ private:
     // Container have structure for fast compare current breakpoints data with new breakpoints data from protocol:
     // path to source -> list of ManagedLineBreakpointMapping that include LineBreakpoint (from protocol) and resolve related data.
     std::unordered_map<std::string, std::list<ManagedLineBreakpointMapping> > m_lineBreakpointMapping;
-
-    HRESULT EnableOneICorBreakpointForLine(std::list<ManagedLineBreakpoint> &bList);
-    HRESULT ResolveLineBreakpoint(ICorDebugModule *pModule, ManagedLineBreakpoint &bp, const std::string &bp_fullname, unsigned &bp_fullname_index);
 
 };
 

@@ -15,9 +15,23 @@ print_help()
     echo "      --repeat      repeat tests, \"1\" by default"
     echo "  -g, --gbsroot     path to GBS root folder, \"\$HOME/GBS-ROOT\" by default"
     echo "  -r, --rpm         path to netcordbg rmp file"
+    echo "  -x, --xml_path    path to test-results-tizen xml xunit format file,"
+    echo "                    \"/tmp\" by default"
     echo "      --help        display this help and exit"
 }
 
+generate_xml()
+{
+    local xml_path=$1
+    local testnames=$2
+
+    echo "<?xml version=\"1.0\" encoding=\"utf-8\" ?>
+        <testsuites>
+            <testsuite name=\"Tests-tizen-app\" tests=\"\" failures=\"\" errors=\"\" time=\"\">
+                ${testnames}
+            </testsuite>
+        </testsuites>" > "${xml_path}/test-results-tizen.xml"
+}
 # DO NOT CHANGE
 # we use first test control program for both tests, since we need NI generation in second test
 # make sure, that you have all sources synchronized
@@ -34,6 +48,7 @@ GBSROOT=${GBSROOT:-$HOME/GBS-ROOT}
 # launch_app have hardcoded path
 TOOLS_ABS_PATH=/home/owner/share/tmp/sdk_tools
 SCRIPTDIR=$(dirname $(readlink -f $0))
+XML_ABS_PATH=${XML_ABS_PATH:-/tmp}
 
 for i in "$@"
 do
@@ -62,6 +77,10 @@ case $i in
     RPMFILE="${i#*=}"
     shift
     ;;
+    -x=*|--xml_path=*)
+    XML_ABS_PATH="${i#*=}"
+    shift
+    ;;
     -h|--help)
     print_help
     exit 0
@@ -82,6 +101,7 @@ if [[ -z $RPMFILE ]]; then
         if [ $($SDB shell od -An -t x1 -j 4 -N 1 /bin/od | grep "02") ]; then ARCH=aarch64;
         else ARCH=armv7l; fi
     elif $SDB shell lscpu | grep -q i686;    then ARCH=i686;
+    elif $SDB shell lscpu | grep -q x86_64;  then ARCH=x86_64;
     else echo "Unknown target architecture"; exit 1; fi
 
     # The following command assumes that GBS build was performed on a clean system (or in Docker),
@@ -130,7 +150,7 @@ for i in $(eval echo {1..$REPEAT}); do
 for TEST_NAME in ${ALL_TEST_NAMES[@]}; do
     HOSTTESTDIR=$SCRIPTDIR/$TEST_NAME
     $DOTNET build $HOSTTESTDIR
-    $SDB install $HOSTTESTDIR/bin/Debug/netcoreapp3.1/org.tizen.example.$TEST_NAME-1.0.0.tpk
+    $SDB install skip $HOSTTESTDIR/bin/Debug/netcoreapp3.1/org.tizen.example.$TEST_NAME-1.0.0.tpk
  
     $SDB shell launch_app org.tizen.example.$TEST_NAME  __AUL_SDK__ NETCOREDBG __DLP_DEBUG_ARG__ --server=4711,--
 
@@ -145,14 +165,19 @@ for TEST_NAME in ${ALL_TEST_NAMES[@]}; do
     if [ "$?" -ne "0" ]; then
         test_fail=$(($test_fail + 1))
         test_list="$test_list$TEST_NAME ... failed\n"
+        test_xml+="<testcase name=\"$TEST_NAME\"><failure></failure></testcase>"
     else
         test_pass=$(($test_pass + 1))
         test_list="$test_list$TEST_NAME ... passed\n"
+        test_xml+="<testcase name=\"$TEST_NAME\"></testcase>"
     fi
 
     $SDB shell pkgcmd -u -n org.tizen.example.$TEST_NAME
 done
 done # REPEAT
+
+#Generate xml test file to XML_ABS_PATH
+generate_xml "${XML_ABS_PATH}" "${test_xml}"
 
 echo ""
 echo -e $test_list

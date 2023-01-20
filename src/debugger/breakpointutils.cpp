@@ -3,8 +3,8 @@
 // See the LICENSE file in the project root for more information.
 
 #include "debugger/breakpointutils.h"
-#include "interfaces/idebugger.h"
-#include "metadata/modules.h"
+#include "debugger/variables.h"
+#include "metadata/attributes.h"
 #include "utils/torelease.h"
 
 namespace netcoredbg
@@ -54,10 +54,22 @@ HRESULT IsSameFunctionBreakpoint(ICorDebugFunctionBreakpoint *pBreakpoint1, ICor
     if (modAddress1 != modAddress2)
         return E_FAIL;
 
+    ToRelease<ICorDebugCode> pCode1;
+    IfFailRet(pFunction1->GetILCode(&pCode1));
+    ULONG32 methodVersion1;
+    IfFailRet(pCode1->GetVersionNumber(&methodVersion1));
+    ToRelease<ICorDebugCode> pCode2;
+    IfFailRet(pFunction2->GetILCode(&pCode2));
+    ULONG32 methodVersion2;
+    IfFailRet(pCode2->GetVersionNumber(&methodVersion2));
+
+    if (methodVersion1 != methodVersion2)
+        return E_FAIL;
+
     return S_OK;
 }
 
-HRESULT IsEnableByCondition(const std::string &condition, IDebugger *debugger, ICorDebugThread *pThread)
+HRESULT IsEnableByCondition(const std::string &condition, Variables *pVariables, ICorDebugThread *pThread)
 {
     HRESULT Status;
 
@@ -67,9 +79,12 @@ HRESULT IsEnableByCondition(const std::string &condition, IDebugger *debugger, I
         IfFailRet(pThread->GetID(&threadId));
         FrameId frameId(ThreadId{threadId}, FrameLevel{0});
 
+        ToRelease<ICorDebugProcess> iCorProcess;
+        IfFailRet(pThread->GetProcess(&iCorProcess));
+
         Variable variable;
         std::string output;
-        IfFailRet(debugger->Evaluate(frameId, condition, variable, output));
+        IfFailRet(pVariables->Evaluate(iCorProcess, frameId, condition, variable, output));
 
         if (variable.type != "bool" || variable.value != "true")
             return E_FAIL;
@@ -85,11 +100,16 @@ HRESULT SkipBreakpoint(ICorDebugModule *pModule, mdMethodDef methodToken, bool j
     // Skip breakpoints outside of code with loaded PDB (see JMC setup during module load).
     ToRelease<ICorDebugFunction> iCorFunction;
     IfFailRet(pModule->GetFunctionFromToken(methodToken, &iCorFunction));
-    BOOL JMCStatus;
     ToRelease<ICorDebugFunction2> iCorFunction2;
-    if (SUCCEEDED(iCorFunction->QueryInterface(IID_ICorDebugFunction2, (LPVOID*) &iCorFunction2)) &&
-        SUCCEEDED(iCorFunction2->GetJMCStatus(&JMCStatus)) &&
-        JMCStatus == FALSE)
+    IfFailRet(iCorFunction->QueryInterface(IID_ICorDebugFunction2, (LPVOID*) &iCorFunction2));
+    BOOL JMCStatus = FALSE;
+    // In case process was not stopped, GetJMCStatus() could return CORDBG_E_PROCESS_NOT_SYNCHRONIZED or another error code.
+    // It is OK, check it as JMC code (pModule have symbols for sure), we will also check JMC status at breakpoint callback itself.
+    if (FAILED(iCorFunction2->GetJMCStatus(&JMCStatus)))
+    {
+        JMCStatus = TRUE;
+    }
+    if (JMCStatus == FALSE)
     {
         return S_OK; // need skip breakpoint
     }

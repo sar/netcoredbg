@@ -210,6 +210,96 @@ namespace NetCoreDbg
         }
 
         /// <summary>
+        /// Maps global method token to a handle local to the current delta PDB. 
+        /// Debug tables referring to methods currently use local handles, not global handles. 
+        /// See https://github.com/dotnet/roslyn/issues/16286
+        /// </summary>
+        private static MethodDefinitionHandle GetDeltaRelativeMethodDefinitionHandle(MetadataReader reader, int methodToken)
+        {
+            var globalHandle = (MethodDefinitionHandle)MetadataTokens.EntityHandle(methodToken);
+
+            if (reader.GetTableRowCount(TableIndex.EncMap) == 0)
+            {
+                return globalHandle;
+            }
+
+            var globalDebugHandle = globalHandle.ToDebugInformationHandle();
+
+            int rowId = 1;
+            foreach (var handle in reader.GetEditAndContinueMapEntries())
+            {
+                if (handle.Kind == HandleKind.MethodDebugInformation)
+                {
+                    if (handle == globalDebugHandle)
+                    {
+                        return MetadataTokens.MethodDefinitionHandle(rowId);
+                    }
+
+                    rowId++;
+                }
+            }
+
+            // compiler generated invalid EncMap table:
+            throw new BadImageFormatException();
+        }
+
+        /// <summary>
+        /// Load delta PDB file.
+        /// </summary>
+        /// <param name="isFileLayout">Delta PDB file path</param>
+        /// <returns>Symbol reader handle or zero if error</returns>
+        internal static IntPtr LoadDeltaPdb([MarshalAs(UnmanagedType.LPWStr)] string pdbPath, out IntPtr data, out int count)
+        {
+            data = IntPtr.Zero;
+            count = 0;
+
+            try
+            {
+                var pdbStream = TryOpenFile(pdbPath);
+                if (pdbStream == null)
+                    return IntPtr.Zero;
+
+                var provider = MetadataReaderProvider.FromPortablePdbStream(pdbStream);
+                var reader = provider.GetMetadataReader();
+
+                OpenedReader openedReader = new OpenedReader(provider, reader);
+                if (openedReader == null)
+                    return IntPtr.Zero;
+
+                var list = new List<int>();
+                foreach (var handle in reader.GetEditAndContinueMapEntries())
+                {
+                    if (handle.Kind == HandleKind.MethodDebugInformation)
+                    {
+                        var methodToken = MetadataTokens.GetToken(((MethodDebugInformationHandle)handle).ToDefinitionHandle());
+                        list.Add(methodToken);
+                    }
+                }
+                if (list.Count > 0)
+                {
+                    var methodsArray = list.ToArray();
+
+                    data = Marshal.AllocCoTaskMem(list.Count * 4);
+                    IntPtr dataPtr = data;
+                    foreach (var p in list)
+                    {
+                        Marshal.WriteInt32(dataPtr, p);
+                        dataPtr = dataPtr + 4;
+                    }
+                    count = list.Count;
+                }
+
+                GCHandle gch = GCHandle.Alloc(openedReader);
+                return GCHandle.ToIntPtr(gch);
+            }
+            catch
+            {
+            }
+
+            return IntPtr.Zero;
+        }
+
+        /// <summary>
         /// Cleanup and dispose of symbol reader handle
         /// </summary>
         /// <param name="symbolReaderHandle">symbol reader handle returned by LoadSymbolsForModule</param>
@@ -229,13 +319,13 @@ namespace NetCoreDbg
 
         internal static SequencePointCollection GetSequencePointCollection(int methodToken, MetadataReader reader)
         {
-            Handle handle = MetadataTokens.Handle(methodToken);
+            Handle handle = GetDeltaRelativeMethodDefinitionHandle(reader, methodToken);
             if (handle.Kind != HandleKind.MethodDefinition)
-                throw new System.ArgumentException();
+                return new SequencePointCollection();
 
             MethodDebugInformationHandle methodDebugHandle = ((MethodDefinitionHandle)handle).ToDebugInformationHandle();
             if (methodDebugHandle.IsNil)
-                throw new System.ArgumentException();
+                return new SequencePointCollection();
 
             MethodDebugInformation methodDebugInfo = reader.GetMethodDebugInformation(methodDebugHandle);
             return methodDebugInfo.GetSequencePoints();
@@ -310,10 +400,10 @@ namespace NetCoreDbg
         /// <param name="sequencePoint">sequence point return</param>
         /// <param name="noUserCodeFound">return 1 in case all sequence points checked and no user code was found, otherwise return 0</param>
         /// <returns>"Ok" if information is available</returns>
-        private static RetCode GetNextSequencePointByILOffset(IntPtr symbolReaderHandle, int methodToken, uint ilOffset, out uint ilCloseOffset, out int noUserCodeFound)
+        private static RetCode GetNextUserCodeILOffset(IntPtr symbolReaderHandle, int methodToken, uint ilOffset, out uint ilNextOffset, out int noUserCodeFound)
         {
             Debug.Assert(symbolReaderHandle != IntPtr.Zero);
-            ilCloseOffset = 0;
+            ilNextOffset = 0;
             noUserCodeFound = 0;
 
             try
@@ -330,7 +420,7 @@ namespace NetCoreDbg
 
                     if (point.Offset >= ilOffset)
                     {
-                        ilCloseOffset = (uint)point.Offset;
+                        ilNextOffset = (uint)point.Offset;
                         return RetCode.OK;
                     }
                 }
@@ -342,45 +432,6 @@ namespace NetCoreDbg
             {
                 return RetCode.Exception;
             }
-        }
-
-        /// <summary>
-        /// Find and return last method's offset for user code.
-        /// </summary>
-        /// <param name="assemblyPath">file path of the assembly or null if the module is in-memory or dynamic</param>
-        /// <param name="methodToken">method token</param>
-        /// <param name="LastIlOffset">return last found IL offset in user code</param>
-        /// <returns>"Ok" if last IL offset was found</returns>
-        internal static RetCode GetMethodLastIlOffset(IntPtr symbolReaderHandle, int methodToken, out uint LastIlOffset)
-        {
-            Debug.Assert(symbolReaderHandle != IntPtr.Zero);
-
-            LastIlOffset = 0;
-            bool foundOffset = false;
-
-            try
-            {
-                GCHandle gch = GCHandle.FromIntPtr(symbolReaderHandle);
-                MetadataReader reader = ((OpenedReader)gch.Target).Reader;
-
-                // We don't use LINQ in order to reduce memory consumption for managed part, so, Reverse() usage not an option here.
-                // Note, SequencePointCollection is IEnumerable based collections.
-                foreach (SequencePoint p in GetSequencePointCollection(methodToken, reader))
-                {
-                    if (p.StartLine == 0 || p.StartLine == SequencePoint.HiddenLine || p.Offset < 0)
-                        continue;
-
-                    // Method's IL start only from 0, use uint for IL offset.
-                    LastIlOffset = (uint)p.Offset;
-                    foundOffset = true;
-                }
-            }
-            catch
-            {
-                return RetCode.Exception;
-            }
-
-            return foundOffset ? RetCode.OK : RetCode.Fail;
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -405,11 +456,6 @@ namespace NetCoreDbg
                 startLine = startLine_;
                 endLine = endLine_;
                 startColumn = startColumn_;
-                endColumn = endColumn_;
-            }
-            public void SetRangeEnd(int endLine_, int endColumn_)
-            {
-                endLine = endLine_;
                 endColumn = endColumn_;
             }
             public void ExtendRange(int startLine_, int endLine_, int startColumn_, int endColumn_)
@@ -461,7 +507,7 @@ namespace NetCoreDbg
         /// <param name="normalTokens">array of normal methods tokens</param>
         /// <param name="data">pointer to memory with result</param>
         /// <returns>"Ok" if information is available</returns>
-        internal static RetCode GetModuleMethodsRanges(IntPtr symbolReaderHandle, int constrNum, IntPtr constrTokens, int normalNum, IntPtr normalTokens, out IntPtr data)
+        internal static RetCode GetModuleMethodsRanges(IntPtr symbolReaderHandle, uint constrNum, IntPtr constrTokens, uint normalNum, IntPtr normalTokens, out IntPtr data)
         {
             Debug.Assert(symbolReaderHandle != IntPtr.Zero);
             data = IntPtr.Zero;
@@ -481,42 +527,17 @@ namespace NetCoreDbg
                 {
                     int methodToken = Marshal.ReadInt32(constrTokens, i);
                     method_data_t currentData = new method_data_t(methodToken, 0, 0, 0, 0);
-                    DocumentHandle currentDocHandle = new DocumentHandle();
 
                     foreach (SequencePoint p in GetSequencePointCollection(methodToken, reader))
                     {
                         if (p.StartLine == 0 || p.StartLine == SequencePoint.HiddenLine)
                             continue;
 
-                        if (currentData.startLine == 0)
-                        {
-                            currentData.SetRange(p.StartLine, p.EndLine, p.StartColumn, p.EndColumn);
-                            currentDocHandle = p.Document;
-                        }
-                        // same segment only in case same file and on next line or on same line but on the right
-                        else if ((p.StartLine == currentData.endLine + 1 ||
-                                  (p.StartLine == currentData.endLine && p.StartColumn > currentData.endColumn)) &&
-                                 currentDocHandle == p.Document )
-                        {
-                            currentData.SetRangeEnd(p.EndLine, p.EndColumn);
-                        }
-                        else // SequencePoint from another segment
-                        {
-                            if (!ModuleData.ContainsKey(currentDocHandle))
-                                ModuleData[currentDocHandle] = new List<method_data_t>();
+                        if (!ModuleData.ContainsKey(p.Document))
+                                ModuleData[p.Document] = new List<method_data_t>();
 
-                            ModuleData[currentDocHandle].Add(currentData);
-                            currentData.SetRange(p.StartLine, p.EndLine, p.StartColumn, p.EndColumn);
-                            currentDocHandle = p.Document;
-                        }
-                    }
-
-                    if (currentData.startLine != 0)
-                    {
-                        if (!ModuleData.ContainsKey(currentDocHandle))
-                            ModuleData[currentDocHandle] = new List<method_data_t>();
-
-                        ModuleData[currentDocHandle].Add(currentData);
+                        currentData.SetRange(p.StartLine, p.EndLine, p.StartColumn, p.EndColumn);
+                        ModuleData[p.Document].Add(currentData);
                     }
                 }
 
@@ -550,6 +571,9 @@ namespace NetCoreDbg
                         ModuleData[currentDocHandle].Add(currentData);
                     }
                 }
+
+                if (ModuleData.Count == 0)
+                    return RetCode.OK;
 
                 int structModuleMethodsDataSize = Marshal.SizeOf<file_methods_data_t>();
                 module_methods_data_t managedData;
@@ -627,19 +651,16 @@ namespace NetCoreDbg
         /// <param name="Count">entry's count in data</param>
         /// <param name="data">pointer to memory with result</param>
         /// <returns>"Ok" if information is available</returns>
-        internal static RetCode ResolveBreakPoints(IntPtr symbolReaderHandle, int tokenNum, IntPtr Tokens, int sourceLine, int nestedToken, out int Count, out IntPtr data)
+        internal static RetCode ResolveBreakPoints(IntPtr symbolReaderHandles, int tokenNum, IntPtr Tokens, int sourceLine, int nestedToken,
+                                                   out int Count, [MarshalAs(UnmanagedType.LPWStr)] string sourcePath, out IntPtr data)
         {
-            Debug.Assert(symbolReaderHandle != IntPtr.Zero);
+            Debug.Assert(symbolReaderHandles != IntPtr.Zero);
             Count = 0;
             data = IntPtr.Zero;
             var list = new List<resolved_bp_t>();
 
             try
             {
-
-                GCHandle gch = GCHandle.FromIntPtr(symbolReaderHandle);
-                MetadataReader reader = ((OpenedReader)gch.Target).Reader;
-
                 // In case nestedToken + sourceLine is part of constructor (tokenNum > 1) we could have cases:
                 // 1. type FieldName1 = new Type();
                 //    void MethodName() {}; type FieldName2 = new Type(); ...  <-- sourceLine
@@ -654,7 +675,7 @@ namespace NetCoreDbg
                 // We need check if nestedToken's method code closer to sourceLine than code from methodToken's method.
                 // If sourceLine closer to nestedToken's method code - setup breakpoint in nestedToken's method.
 
-                SequencePoint FirstSequencePointForSourceLine(int methodToken)
+                SequencePoint FirstSequencePointForSourceLine(ref MetadataReader reader, int methodToken)
                 {
                     // Note, SequencePoints ordered by IL offsets, not by line numbers.
                     // For example, infinite loop `while(true)` will have IL offset after cycle body's code.
@@ -663,6 +684,11 @@ namespace NetCoreDbg
                     foreach (SequencePoint p in GetSequencePointCollection(methodToken, reader))
                     {
                         if (p.StartLine == 0 || p.StartLine == SequencePoint.HiddenLine || p.EndLine < sourceLine)
+                            continue;
+
+                        // Note, in case of constructors, we must care about source too, since we may have situation when field/property have same line in another source.
+                        var fileName = reader.GetString(reader.GetDocument(p.Document).Name);
+                        if (fileName != sourcePath)
                             continue;
 
                         // first access, assign to first user code sequence point
@@ -688,16 +714,20 @@ namespace NetCoreDbg
                 }
 
                 int elementSize = 4;
-                for (int i = 0; i < tokenNum * elementSize; i += elementSize)
+                for (int i = 0; i < tokenNum; i++)
                 {
-                    int methodToken = Marshal.ReadInt32(Tokens, i);
-                    SequencePoint current_p = FirstSequencePointForSourceLine(methodToken);
+                    IntPtr symbolReaderHandle = Marshal.ReadIntPtr(symbolReaderHandles, i * IntPtr.Size);
+                    GCHandle gch = GCHandle.FromIntPtr(symbolReaderHandle);
+                    MetadataReader reader = ((OpenedReader)gch.Target).Reader;
+
+                    int methodToken = Marshal.ReadInt32(Tokens, i * elementSize);
+                    SequencePoint current_p = FirstSequencePointForSourceLine(ref reader, methodToken);
                     // Note, we don't check that current_p was found or not, since we know for sure, that sourceLine could be resolved in method.
                     // Same idea for nested_p below, if we have nestedToken - it will be resolved for sure.
 
                     if (nestedToken != 0)
                     {
-                        SequencePoint nested_p = FirstSequencePointForSourceLine(nestedToken);
+                        SequencePoint nested_p = FirstSequencePointForSourceLine(ref reader, nestedToken);
                         if (current_p.EndLine > nested_p.EndLine || (current_p.EndLine == nested_p.EndLine && current_p.EndColumn > nested_p.EndColumn))
                         {
                             list.Add(new resolved_bp_t(nested_p.StartLine, nested_p.EndLine, nested_p.Offset, nestedToken));
@@ -835,7 +865,7 @@ namespace NetCoreDbg
             GCHandle gch = GCHandle.FromIntPtr(symbolReaderHandle);
             MetadataReader reader = ((OpenedReader)gch.Target).Reader;
 
-            Handle handle = MetadataTokens.Handle(methodToken);
+            Handle handle = GetDeltaRelativeMethodDefinitionHandle(reader, methodToken);
             if (handle.Kind != HandleKind.MethodDefinition)
                 return false;
 
@@ -862,6 +892,78 @@ namespace NetCoreDbg
             }
 
             return false;
+        }
+
+        /// <summary>
+        /// Returns local variable name for given local index and IL offset.
+        /// </summary>
+        /// <param name="symbolReaderHandle">symbol reader handle returned by LoadSymbolsForModule</param>
+        /// <param name="methodToken">method token</param>
+        /// <param name="data">pointer to memory with histed local scopes</param>
+        /// <param name="hoistedLocalScopesCount">histed local scopes count</param>
+        /// <returns>"Ok" if information is available</returns>
+        internal static RetCode GetHoistedLocalScopes(IntPtr symbolReaderHandle, int methodToken, out IntPtr data, out int hoistedLocalScopesCount)
+        {
+            data = IntPtr.Zero;
+            hoistedLocalScopesCount = 0;
+
+            try
+            {
+                GCHandle gch = GCHandle.FromIntPtr(symbolReaderHandle);
+                MetadataReader reader = ((OpenedReader)gch.Target).Reader;
+
+                Handle handle = GetDeltaRelativeMethodDefinitionHandle(reader, methodToken);
+                if (handle.Kind != HandleKind.MethodDefinition)
+                    return RetCode.Fail;
+
+                MethodDebugInformationHandle methodDebugInformationHandle = ((MethodDefinitionHandle)handle).ToDebugInformationHandle();
+                var entityHandle = MetadataTokens.EntityHandle(MetadataTokens.GetToken(methodDebugInformationHandle.ToDefinitionHandle()));
+
+                // Guid is taken from Roslyn source code:
+                // https://github.com/dotnet/roslyn/blob/afd10305a37c0ffb2cfb2c2d8446154c68cfa87a/src/Dependencies/CodeAnalysis.Debugging/PortableCustomDebugInfoKinds.cs#L14
+                Guid stateMachineHoistedLocalScopes = new Guid("6DA9A61E-F8C7-4874-BE62-68BC5630DF71");
+
+                var HoistedLocalScopes = new List<UInt32>();
+                foreach (var cdiHandle in reader.GetCustomDebugInformation(entityHandle))
+                {
+                    var cdi = reader.GetCustomDebugInformation(cdiHandle);
+
+                    if (reader.GetGuid(cdi.Kind) == stateMachineHoistedLocalScopes)
+                    {
+                        // Format of this blob is taken from Roslyn source code:
+                        // https://github.com/dotnet/roslyn/blob/afd10305a37c0ffb2cfb2c2d8446154c68cfa87a/src/Compilers/Core/Portable/PEWriter/MetadataWriter.PortablePdb.cs#L600
+
+                        var blobReader = reader.GetBlobReader(cdi.Value);
+
+                        while (blobReader.Offset < blobReader.Length)
+                        {
+                            HoistedLocalScopes.Add(blobReader.ReadUInt32()); // StartOffset
+                            HoistedLocalScopes.Add(blobReader.ReadUInt32()); // Length
+                        }
+                    }
+                }
+
+                if (HoistedLocalScopes.Count == 0)
+                    return RetCode.Fail;
+
+                data = Marshal.AllocCoTaskMem(HoistedLocalScopes.Count * 4);
+                IntPtr dataPtr = data;
+                foreach (var p in HoistedLocalScopes)
+                {
+                    Marshal.StructureToPtr(p, dataPtr, false);
+                    dataPtr = dataPtr + 4;
+                }
+                hoistedLocalScopesCount = HoistedLocalScopes.Count / 2;
+            }
+            catch
+            {
+                if (data != IntPtr.Zero)
+                    Marshal.FreeCoTaskMem(data);
+
+                return RetCode.Exception;
+            }
+
+            return RetCode.OK;
         }
 
         /// <summary>
@@ -903,7 +1005,7 @@ namespace NetCoreDbg
                 GCHandle gch = GCHandle.FromIntPtr(symbolReaderHandle);
                 MetadataReader reader = ((OpenedReader)gch.Target).Reader;
 
-                Handle handle = MetadataTokens.Handle(methodToken);
+                Handle handle = GetDeltaRelativeMethodDefinitionHandle(reader, methodToken);
                 if (handle.Kind != HandleKind.MethodDefinition)
                     return false;
 
@@ -1192,17 +1294,22 @@ namespace NetCoreDbg
         }
 
         /// <summary>
-        /// Helper method to return all async methods stepping information.
+        /// Helper method to return async method stepping information and return last method's offset for user code.
         /// </summary>
         /// <param name="symbolReaderHandle">symbol reader handle returned by LoadSymbolsForModule</param>
-        /// <param name="asyncInfo">array with all async methods stepping information</param>
+        /// <param name="methodToken">method token</param>
+        /// <param name="asyncInfo">array with all async method stepping information</param>
         /// <param name="asyncInfoCount">entry's count in asyncInfo</param>
-        internal static RetCode GetAsyncMethodsSteppingInfo(IntPtr symbolReaderHandle, out IntPtr asyncInfo, out int asyncInfoCount)
+        /// <param name="LastIlOffset">return last found IL offset in user code</param>
+        /// <returns>"Ok" if method have at least one await block and last IL offset was found</returns>
+        internal static RetCode GetAsyncMethodSteppingInfo(IntPtr symbolReaderHandle, int methodToken, out IntPtr asyncInfo, out int asyncInfoCount, out uint LastIlOffset)
         {
             Debug.Assert(symbolReaderHandle != IntPtr.Zero);
 
             asyncInfo = IntPtr.Zero;
             asyncInfoCount = 0;
+            LastIlOffset = 0;
+            bool foundOffset = false;
             var list = new List<AsyncAwaitInfoBlock>();
 
             try
@@ -1210,42 +1317,44 @@ namespace NetCoreDbg
                 GCHandle gch = GCHandle.FromIntPtr(symbolReaderHandle);
                 MetadataReader reader = ((OpenedReader)gch.Target).Reader;
 
+                Handle handle = GetDeltaRelativeMethodDefinitionHandle(reader, methodToken);
+                if (handle.Kind != HandleKind.MethodDefinition)
+                    return RetCode.Fail;
+
+                MethodDebugInformationHandle methodDebugInformationHandle = ((MethodDefinitionHandle)handle).ToDebugInformationHandle();
+                var entityHandle = MetadataTokens.EntityHandle(MetadataTokens.GetToken(methodDebugInformationHandle.ToDefinitionHandle()));
+
                 // Guid is taken from Roslyn source code:
                 // https://github.com/dotnet/roslyn/blob/afd10305a37c0ffb2cfb2c2d8446154c68cfa87a/src/Dependencies/CodeAnalysis.Debugging/PortableCustomDebugInfoKinds.cs#L13
                 Guid asyncMethodSteppingInformationBlob = new Guid("54FD2AC5-E925-401A-9C2A-F94F171072F8");
 
-                foreach (MethodDebugInformationHandle methodDebugInformationHandle in reader.MethodDebugInformation)
+                foreach (var cdiHandle in reader.GetCustomDebugInformation(entityHandle))
                 {
-                    var entityHandle = MetadataTokens.EntityHandle(MetadataTokens.GetToken(methodDebugInformationHandle.ToDefinitionHandle()));
+                    var cdi = reader.GetCustomDebugInformation(cdiHandle);
 
-                    foreach (var cdiHandle in reader.GetCustomDebugInformation(entityHandle))
+                    if (reader.GetGuid(cdi.Kind) == asyncMethodSteppingInformationBlob)
                     {
-                        var cdi = reader.GetCustomDebugInformation(cdiHandle);
+                        // Format of this blob is taken from Roslyn source code:
+                        // https://github.com/dotnet/roslyn/blob/afd10305a37c0ffb2cfb2c2d8446154c68cfa87a/src/Compilers/Core/Portable/PEWriter/MetadataWriter.PortablePdb.cs#L575
 
-                        if (reader.GetGuid(cdi.Kind) == asyncMethodSteppingInformationBlob)
+                        var blobReader = reader.GetBlobReader(cdi.Value);
+                        blobReader.ReadUInt32(); // skip catch_handler_offset
+
+                        while (blobReader.Offset < blobReader.Length)
                         {
-                            // Format of this blob is taken from Roslyn source code:
-                            // https://github.com/dotnet/roslyn/blob/afd10305a37c0ffb2cfb2c2d8446154c68cfa87a/src/Compilers/Core/Portable/PEWriter/MetadataWriter.PortablePdb.cs#L575
-
-                            var blobReader = reader.GetBlobReader(cdi.Value);
-                            blobReader.ReadUInt32(); // skip catch_handler_offset
-
-                            while (blobReader.Offset < blobReader.Length)
-                            {
-                                list.Add(new AsyncAwaitInfoBlock() {
-                                    yield_offset = blobReader.ReadUInt32(),
-                                    resume_offset = blobReader.ReadUInt32(),
-                                    // explicit conversion from int into uint here, see:
-                                    // https://docs.microsoft.com/en-us/dotnet/api/system.reflection.metadata.blobreader.readcompressedinteger
-                                    token = (uint)blobReader.ReadCompressedInteger()
-                                });
-                            }
+                            list.Add(new AsyncAwaitInfoBlock() {
+                                yield_offset = blobReader.ReadUInt32(),
+                                resume_offset = blobReader.ReadUInt32(),
+                                // explicit conversion from int into uint here, see:
+                                // https://docs.microsoft.com/en-us/dotnet/api/system.reflection.metadata.blobreader.readcompressedinteger
+                                token = (uint)blobReader.ReadCompressedInteger()
+                            });
                         }
                     }
                 }
 
                 if (list.Count == 0)
-                    return RetCode.OK;
+                    return RetCode.Fail;
 
                 int structSize = Marshal.SizeOf<AsyncAwaitInfoBlock>();
                 asyncInfo = Marshal.AllocCoTaskMem(list.Count * structSize);
@@ -1258,6 +1367,27 @@ namespace NetCoreDbg
                 }
 
                 asyncInfoCount = list.Count;
+
+                // We don't use LINQ in order to reduce memory consumption for managed part, so, Reverse() usage not an option here.
+                // Note, SequencePointCollection is IEnumerable based collections.
+                foreach (SequencePoint p in GetSequencePointCollection(methodToken, reader))
+                {
+                    if (p.StartLine == 0 || p.StartLine == SequencePoint.HiddenLine || p.Offset < 0)
+                        continue;
+
+                    // Method's IL start only from 0, use uint for IL offset.
+                    LastIlOffset = (uint)p.Offset;
+                    foundOffset = true;
+                }
+
+                if (!foundOffset)
+                {
+                    if (asyncInfo != IntPtr.Zero)
+                        Marshal.FreeCoTaskMem(asyncInfo);
+
+                    asyncInfo = IntPtr.Zero;
+                    return RetCode.Fail;
+                }
             }
             catch
             {

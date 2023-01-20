@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <unordered_set>
 
 
 namespace netcoredbg
@@ -66,28 +67,6 @@ namespace Interop
         }
     };
 
-    // Keep in sync with string[] basicTypes in Evaluation.cs
-    enum BasicTypes {
-        TypeCorValue = -1,
-        TypeObject = 0, //     "System.Object",
-        TypeBoolean, //        "System.Boolean",
-        TypeByte,    //        "System.Byte",
-        TypeSByte,   //        "System.SByte",
-        TypeChar,    //        "System.Char",
-        TypeDouble,  //        "System.Double",
-        TypeSingle,  //        "System.Single",
-        TypeInt32,   //        "System.Int32",
-        TypeUInt32,  //        "System.UInt32",
-        TypeInt64,   //        "System.Int64",
-        TypeUInt64,  //        "System.UInt64",
-        TypeInt16,   //        "System.Int16",
-        TypeUInt16,  //        "System.UInt16",
-        TypeIntPtr,  //        "System.IntPtr",
-        TypeUIntPtr, //        "System.UIntPtr",
-        TypeDecimal, //        "System.Decimal",
-        TypeString,  //        "System.String"
-    };
-
     struct AsyncAwaitInfoBlock
     {
         uint32_t yield_offset;
@@ -99,28 +78,30 @@ namespace Interop
         {}
     };
 
-    typedef std::function<bool(PVOID, const std::string&, int*, PVOID*)> GetChildCallback;
-
     // WARNING! Due to CoreCLR limitations, Init() / Shutdown() sequence can be used only once during process execution.
     // Note, init in case of error will throw exception, since this is fatal for debugger (CoreCLR can't be re-init).
     void Init(const std::string &coreClrPath);
     // WARNING! Due to CoreCLR limitations, Shutdown() can't be called out of the Main() scope, for example, from global object destructor.
     void Shutdown();
 
-    HRESULT LoadSymbols(IMetaDataImport *pMD, ICorDebugModule *pModule, VOID **ppSymbolReaderHandle);
+    HRESULT LoadSymbolsForPortablePDB(const std::string &modulePath, BOOL isInMemory, BOOL isFileLayout, ULONG64 peAddress, ULONG64 peSize,
+                                      ULONG64 inMemoryPdbAddress, ULONG64 inMemoryPdbSize, VOID **ppSymbolReaderHandle);
     void DisposeSymbols(PVOID pSymbolReaderHandle);
     HRESULT GetSequencePointByILOffset(PVOID pSymbolReaderHandle, mdMethodDef MethodToken, ULONG32 IlOffset, SequencePoint *sequencePoint);
-    HRESULT GetNextSequencePointByILOffset(PVOID pSymbolReaderHandle, mdMethodDef MethodToken, ULONG32 IlOffset, ULONG32 &ilCloseOffset, bool *noUserCodeFound);
+    HRESULT GetNextUserCodeILOffset(PVOID pSymbolReaderHandle, mdMethodDef MethodToken, ULONG32 IlOffset, ULONG32 &ilNextOffset, bool *noUserCodeFound);
     HRESULT GetNamedLocalVariableAndScope(PVOID pSymbolReaderHandle, mdMethodDef methodToken, ULONG localIndex,
-                                          WCHAR *paramName, ULONG paramNameLen, ULONG32 *pIlStart, ULONG32 *pIlEnd);
+                                          WCHAR *localName, ULONG localNameLen, ULONG32 *pIlStart, ULONG32 *pIlEnd);
+    HRESULT GetHoistedLocalScopes(PVOID pSymbolReaderHandle, mdMethodDef methodToken, PVOID *data, int32_t &hoistedLocalScopesCount);
     HRESULT GetStepRangesFromIP(PVOID pSymbolReaderHandle, ULONG32 ip, mdMethodDef MethodToken, ULONG32 *ilStartOffset, ULONG32 *ilEndOffset);
-    HRESULT GetMethodLastIlOffset(PVOID pSymbolReaderHandle, mdMethodDef methodToken, ULONG32 *ilOffset);
-    HRESULT GetModuleMethodsRanges(PVOID pSymbolReaderHandle, int32_t constrTokensNum, PVOID constrTokens, int32_t normalTokensNum, PVOID normalTokens, PVOID *data);
-    HRESULT ResolveBreakPoints(PVOID pSymbolReaderHandle, int32_t tokenNum, PVOID Tokens, int32_t sourceLine, int32_t nestedToken, int32_t &Count, PVOID *data);
-    HRESULT GetAsyncMethodsSteppingInfo(PVOID pSymbolReaderHandle, std::vector<AsyncAwaitInfoBlock> &AsyncAwaitInfo);
+    HRESULT GetModuleMethodsRanges(PVOID pSymbolReaderHandle, uint32_t constrTokensNum, PVOID constrTokens, uint32_t normalTokensNum, PVOID normalTokens, PVOID *data);
+    HRESULT ResolveBreakPoints(PVOID pSymbolReaderHandles[], int32_t tokenNum, PVOID Tokens, int32_t sourceLine, int32_t nestedToken, int32_t &Count, const std::string &sourcePath, PVOID *data);
+    HRESULT GetAsyncMethodSteppingInfo(PVOID pSymbolReaderHandle, mdMethodDef methodToken, std::vector<AsyncAwaitInfoBlock> &AsyncAwaitInfo, ULONG32 *ilOffset);
     HRESULT GetSource(PVOID symbolReaderHandle, const std::string fileName, PVOID *data, int32_t *length);
-    HRESULT ParseExpression(const std::string &expr, const std::string &typeName, std::string &data, std::string &errorText);
-    HRESULT EvalExpression(const std::string &expr, std::string &result, int *typeId, ICorDebugValue **ppValue, GetChildCallback cb);
+    HRESULT LoadDeltaPdb(const std::string &pdbPath, VOID **ppSymbolReaderHandle, std::unordered_set<mdMethodDef> &methodTokens);
+    HRESULT CalculationDelegate(PVOID firstOp, int32_t firstType, PVOID secondOp, int32_t secondType, int32_t operationType, int32_t &resultType, PVOID *data, std::string &errorText);
+    HRESULT GenerateStackMachineProgram(const std::string &expr, PVOID *ppStackProgram, std::string &textOutput);
+    void ReleaseStackMachineProgram(PVOID pStackProgram);
+    HRESULT NextStackCommand(PVOID pStackProgram, int32_t &Command, PVOID &Ptr, std::string &textOutput);
     PVOID AllocString(const std::string &str);
     HRESULT StringToUpper(std::string &String);
     BSTR SysAllocStringLen(int32_t size);

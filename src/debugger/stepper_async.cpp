@@ -5,7 +5,7 @@
 #include "debugger/stepper_simple.h"
 #include "debugger/stepper_async.h"
 #include "debugger/threads.h"
-#include "metadata/modules.h"
+#include "metadata/typeprinter.h"
 #include "debugger/evalhelpers.h"
 #include "debugger/valueprint.h"
 #include "utils/utf.h"
@@ -151,7 +151,7 @@ static HRESULT GetAsyncIdReference(ICorDebugThread *pThread, ICorDebugFrame *pFr
     // Call 'ObjectIdForDebugger' property getter.
     ToRelease<ICorDebugFunction> pFunc;
     IfFailRet(pModule->GetFunctionFromToken(mdObjectIdForDebuggerGetter, &pFunc));
-    IfFailRet(pEvalHelpers->EvalFunction(pThread, pFunc, pType.GetRef(), 1, pValue.GetRef(), 1, ppValueAsyncIdRef, defaultEvalFlags));
+    IfFailRet(pEvalHelpers->EvalFunction(pThread, pFunc, nullptr, 0, pValue.GetRef(), 1, ppValueAsyncIdRef, defaultEvalFlags));
 
     return S_OK;
 }
@@ -160,15 +160,13 @@ static HRESULT GetAsyncIdReference(ICorDebugThread *pThread, ICorDebugFrame *pFr
 // [in] pThread - managed thread for evaluation (related to pFrame);
 // [in] pFrame - frame that used for get all info needed (function, module, etc);
 // [in] pEvalHelpers - pointer to managed debugger EvalHelpers;
-static HRESULT SetNotificationForWaitCompletion(ICorDebugThread *pThread, ICorDebugFrame *pFrame, EvalHelpers *pEvalHelpers)
+static HRESULT SetNotificationForWaitCompletion(ICorDebugThread *pThread, ICorDebugFrame *pFrame, ICorDebugValue *pBuilderValue, EvalHelpers *pEvalHelpers)
 {
     HRESULT Status;
-    ToRelease<ICorDebugValue> pValue;
-    IfFailRet(GetAsyncTBuilder(pFrame, &pValue));
 
     // Find SetNotificationForWaitCompletion() method.
     ToRelease<ICorDebugValue2> pValue2;
-    IfFailRet(pValue->QueryInterface(IID_ICorDebugValue2, (LPVOID *) &pValue2));
+    IfFailRet(pBuilderValue->QueryInterface(IID_ICorDebugValue2, (LPVOID *) &pValue2));
     ToRelease<ICorDebugType> pType;
     IfFailRet(pValue2->GetExactType(&pType));
     ToRelease<ICorDebugClass> pClass;
@@ -227,19 +225,12 @@ static HRESULT SetNotificationForWaitCompletion(ICorDebugThread *pThread, ICorDe
     rgbValue[0] = 1; // TRUE
     IfFailRet(pGenericValue->SetValue((LPVOID) &(rgbValue[0])));
 
-
     // Call this.<>t__builder.SetNotificationForWaitCompletion(TRUE).
-    ToRelease<ICorDebugValue2> pNewBooleanValue2;
-    IfFailRet(pNewBoolean->QueryInterface(IID_ICorDebugValue2, (LPVOID *) &pNewBooleanValue2));
-    ToRelease<ICorDebugType> pNewBooleanType;
-    IfFailRet(pNewBooleanValue2->GetExactType(&pNewBooleanType));
-
     ToRelease<ICorDebugFunction> pFunc;
     IfFailRet(pModule->GetFunctionFromToken(setNotifDef, &pFunc));
 
-    ICorDebugType *ppArgsType[] = {pType, pNewBooleanType};
-    ICorDebugValue *ppArgsValue[] = {pValue, pNewBoolean};
-    IfFailRet(pEvalHelpers->EvalFunction(pThread, pFunc, ppArgsType, 2, ppArgsValue, 2, nullptr, defaultEvalFlags));
+    ICorDebugValue *ppArgsValue[] = {pBuilderValue, pNewBoolean};
+    IfFailRet(pEvalHelpers->EvalFunction(pThread, pFunc, nullptr, 0, ppArgsValue, 2, nullptr, defaultEvalFlags));
 
     return S_OK;
 }
@@ -263,8 +254,10 @@ HRESULT AsyncStepper::SetupStep(ICorDebugThread *pThread, IDebugger::StepType st
     IfFailRet(pFunc->GetModule(&pModule));
     CORDB_ADDRESS modAddress;
     IfFailRet(pModule->GetBaseAddress(&modAddress));
+    ULONG32 methodVersion;
+    IfFailRet(pCode->GetVersionNumber(&methodVersion));
 
-    if (!m_sharedModules->IsMethodHaveAwait(modAddress, methodToken))
+    if (!m_uniqueAsyncInfo->IsMethodHaveAwait(modAddress, methodToken, methodVersion))
         return S_FALSE; // setup simple stepper
 
     ToRelease<ICorDebugILFrame> pILFrame;
@@ -278,21 +271,32 @@ HRESULT AsyncStepper::SetupStep(ICorDebugThread *pThread, IDebugger::StepType st
     // switch to step-out, so whole NotifyDebuggerOfWaitCompletion magic happens.
     ULONG32 lastIlOffset;
     if (stepType != IDebugger::StepType::STEP_OUT &&
-        m_sharedModules->FindLastIlOffsetAwaitInfo(modAddress, methodToken, lastIlOffset) &&
+        m_uniqueAsyncInfo->FindLastIlOffsetAwaitInfo(modAddress, methodToken, methodVersion, lastIlOffset) &&
         ipOffset >= lastIlOffset)
     {
         stepType = IDebugger::StepType::STEP_OUT;
     }
     if (stepType == IDebugger::StepType::STEP_OUT)
     {
-        IfFailRet(SetNotificationForWaitCompletion(pThread, pFrame, m_sharedEvalHelpers.get()));
+        ToRelease<ICorDebugValue> pBuilderValue;
+        IfFailRet(GetAsyncTBuilder(pFrame, &pBuilderValue));
+
+        // In case method is "async void", builder is "System.Runtime.CompilerServices.AsyncVoidMethodBuilder"
+        // "If we are inside `async void` method, do normal step-out" from:
+        // https://github.com/dotnet/runtime/blob/32d0360b73bd77256cc9a9314a3c4280a61ea9bc/src/mono/mono/component/debugger-engine.c#L1350
+        std::string builderType;
+        IfFailRet(TypePrinter::GetTypeOfValue(pBuilderValue, builderType));
+        if (builderType == "System.Runtime.CompilerServices.AsyncVoidMethodBuilder")
+            return m_simpleStepper->SetupStep(pThread, IDebugger::StepType::STEP_OUT);
+
+        IfFailRet(SetNotificationForWaitCompletion(pThread, pFrame, pBuilderValue, m_sharedEvalHelpers.get()));
         IfFailRet(SetBreakpointIntoNotifyDebuggerOfWaitCompletion());
         // Note, we don't create stepper here, since all we need in case of breakpoint is call Continue() from StepCommand().
         return S_OK;
     }
 
-    Modules::AwaitInfo *awaitInfo = nullptr;
-    if (m_sharedModules->FindNextAwaitInfo(modAddress, methodToken, ipOffset, &awaitInfo))
+    AsyncInfo::AwaitInfo *awaitInfo = nullptr;
+    if (m_uniqueAsyncInfo->FindNextAwaitInfo(modAddress, methodToken, methodVersion, ipOffset, &awaitInfo))
     {
         // We have step inside async function with await, setup breakpoint at closest await's yield_offset.
         // Two possible cases here:
@@ -351,50 +355,18 @@ HRESULT AsyncStepper::DisableAllSteppers()
 HRESULT AsyncStepper::SetBreakpointIntoNotifyDebuggerOfWaitCompletion()
 {
     HRESULT Status = S_OK;
+    static const std::string assemblyName = "System.Private.CoreLib.dll";
+    static const WCHAR className[] = W("System.Threading.Tasks.Task");
+    static const WCHAR methodName[] = W("NotifyDebuggerOfWaitCompletion");
+    ToRelease<ICorDebugFunction> pFunc;
+    IfFailRet(m_sharedEvalHelpers->FindMethodInModule(assemblyName, className, methodName, &pFunc));
 
     ToRelease<ICorDebugModule> pModule;
-    IfFailRet(m_sharedModules->GetModuleWithName("System.Private.CoreLib.dll", &pModule));
-
-    ToRelease<IUnknown> pMDUnknown;
-    IfFailRet(pModule->GetMetaDataInterface(IID_IMetaDataImport, &pMDUnknown));
-    ToRelease<IMetaDataImport> pMD;
-    IfFailRet(pMDUnknown->QueryInterface(IID_IMetaDataImport, (LPVOID*) &pMD));
-
-    mdTypeDef typeDef = mdTypeDefNil;
-    static const WCHAR strTypeDef[] = W("System.Threading.Tasks.Task");
-    IfFailRet(pMD->FindTypeDefByName(strTypeDef, mdTypeDefNil, &typeDef));
-
-    ULONG numMethods = 0;
-    HCORENUM hEnum = NULL;
-    mdMethodDef methodDef;
-    mdMethodDef notifyDef = mdMethodDefNil;
-    while(SUCCEEDED(pMD->EnumMethods(&hEnum, typeDef, &methodDef, 1, &numMethods)) && numMethods != 0)
-    {
-        mdTypeDef memTypeDef;
-        ULONG nameLen;
-        WCHAR szFunctionName[mdNameLen] = {0};
-        if (FAILED(pMD->GetMethodProps(methodDef, &memTypeDef,
-                                       szFunctionName, _countof(szFunctionName), &nameLen,
-                                       nullptr, nullptr, nullptr, nullptr, nullptr)))
-        {
-            continue;
-        }
-
-        if (!str_equal(szFunctionName, W("NotifyDebuggerOfWaitCompletion")))
-            continue;
-
-        notifyDef = methodDef;
-        break;
-    }
-    pMD->CloseEnum(hEnum);
-
-    if (notifyDef == mdMethodDefNil)
-        return E_FAIL;
-
+    IfFailRet(pFunc->GetModule(&pModule));
     CORDB_ADDRESS modAddress;
     IfFailRet(pModule->GetBaseAddress(&modAddress));
-    ToRelease<ICorDebugFunction> pFunc;
-    IfFailRet(pModule->GetFunctionFromToken(notifyDef, &pFunc));
+    mdMethodDef methodDef;
+    IfFailRet(pFunc->GetToken(&methodDef));
 
     ToRelease<ICorDebugCode> pCode;
     IfFailRet(pFunc->GetILCode(&pCode));
@@ -407,7 +379,7 @@ HRESULT AsyncStepper::SetBreakpointIntoNotifyDebuggerOfWaitCompletion()
     m_asyncStepNotifyDebuggerOfWaitCompletion.reset(new asyncBreakpoint_t());
     m_asyncStepNotifyDebuggerOfWaitCompletion->iCorFuncBreakpoint = iCorFuncBreakpoint.Detach();
     m_asyncStepNotifyDebuggerOfWaitCompletion->modAddress = modAddress;
-    m_asyncStepNotifyDebuggerOfWaitCompletion->methodToken = notifyDef;
+    m_asyncStepNotifyDebuggerOfWaitCompletion->methodToken = methodDef;
 
     return S_OK;
 }

@@ -34,7 +34,8 @@ class ManagedCallback final : public ICorDebugManagedCallback, ICorDebugManagedC
         Breakpoint,
         StepComplete,
         Break,
-        Exception
+        Exception,
+        CreateProcess
     };
 
     struct CallbackQueueEntry
@@ -75,6 +76,7 @@ class ManagedCallback final : public ICorDebugManagedCallback, ICorDebugManagedC
     bool CallbacksWorkerStepComplete(ICorDebugAppDomain *pAppDomain, ICorDebugThread *pThread, CorDebugStepReason reason);
     bool CallbacksWorkerBreak(ICorDebugAppDomain *pAppDomain, ICorDebugThread *pThread);
     bool CallbacksWorkerException(ICorDebugAppDomain *pAppDomain, ICorDebugThread *pThread, ExceptionCallbackType eventType, const std::string &excModule);
+    bool CallbacksWorkerCreateProcess();
     HRESULT AddCallbackToQueue(ICorDebugAppDomain *pAppDomain, std::function<void()> callback);
     bool HasQueuedCallbacks(ICorDebugProcess *pProcess);
     HRESULT ContinueAppDomainWithCallbacksQueue(ICorDebugAppDomain *pAppDomain);
@@ -87,10 +89,13 @@ public:
     ~ManagedCallback();
     ULONG GetRefCount();
 
-    // Called from ManagedDebugger by protocol request (Continue/StepCommand/Pause).
+    // Called from ManagedDebugger by protocol request (Continue/Pause).
     bool IsRunning();
     HRESULT Continue(ICorDebugProcess *pProcess);
-    HRESULT Pause(ICorDebugProcess *pProcess);
+    // Stop process and set last stopped thread. If `lastStoppedThread` not passed value from protocol, find best thread.
+    HRESULT Pause(ICorDebugProcess *pProcess, ThreadId lastStoppedThread);
+    // Analog of "pProcess->Stop(0)" call that also care about callbacks.
+    HRESULT Stop(ICorDebugProcess *pProcess);
 
     // IUnknown
 

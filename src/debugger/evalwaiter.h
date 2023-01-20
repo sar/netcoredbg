@@ -22,9 +22,10 @@ public:
 
     typedef std::function<HRESULT(ICorDebugEval*)> WaitEvalResultCallback;
 
-    EvalWaiter(std::shared_ptr<Threads> &sharedThreads) : m_sharedThreads(sharedThreads) {}
+    EvalWaiter(std::shared_ptr<Threads> &sharedThreads) : m_sharedThreads(sharedThreads), m_evalCanceled(false), m_evalCrossThreadDependency(false) {}
 
     bool IsEvalRunning();
+    void CancelEvalRunning();
     ICorDebugEval *FindEvalForThread(ICorDebugThread *pThread);
 
     HRESULT WaitEvalResult(ICorDebugThread *pThread,
@@ -38,15 +39,23 @@ public:
 private:
 
     std::shared_ptr<Threads> m_sharedThreads;
+    bool m_evalCanceled;
+    bool m_evalCrossThreadDependency;
+
+    struct evalResultData_t
+    {
+        ToRelease<ICorDebugValue> iCorEval;
+        HRESULT Status = E_FAIL;
+    };
 
     struct evalResult_t {
         evalResult_t() = delete;
-        evalResult_t(DWORD threadId_, ICorDebugEval *pEval_, const std::promise< std::unique_ptr<ToRelease<ICorDebugValue>> > &promiseValue_) = delete;
+        evalResult_t(DWORD threadId_, ICorDebugEval *pEval_, const std::promise< std::unique_ptr<evalResultData_t> > &promiseValue_) = delete;
         evalResult_t(const evalResult_t &B) = delete;
         evalResult_t& operator = (const evalResult_t &B) = delete;
         evalResult_t& operator = (evalResult_t &&B) = delete;
 
-        evalResult_t(DWORD threadId_, ICorDebugEval *pEval_, std::promise< std::unique_ptr<ToRelease<ICorDebugValue>> > &&promiseValue_) :
+        evalResult_t(DWORD threadId_, ICorDebugEval *pEval_, std::promise< std::unique_ptr<evalResultData_t> > &&promiseValue_) :
             threadId(threadId_),
             pEval(pEval_),
             promiseValue(std::move(promiseValue_))
@@ -61,14 +70,15 @@ private:
 
         DWORD threadId;
         ICorDebugEval *pEval;
-        std::promise< std::unique_ptr<ToRelease<ICorDebugValue>> > promiseValue;
+        std::promise< std::unique_ptr<evalResultData_t> > promiseValue;
     };
 
     std::mutex m_waitEvalResultMutex;
     std::mutex m_evalResultMutex;
     std::unique_ptr<evalResult_t> m_evalResult;
 
-    std::future< std::unique_ptr<ToRelease<ICorDebugValue>> > RunEval(
+    std::future< std::unique_ptr<evalResultData_t> > RunEval(
+        HRESULT &Status,
         ICorDebugProcess *pProcess,
         ICorDebugThread *pThread,
         ICorDebugEval *pEval,

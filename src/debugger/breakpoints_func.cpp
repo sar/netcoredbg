@@ -8,6 +8,7 @@
 #include "metadata/modules.h"
 #include <sstream>
 #include <unordered_set>
+#include <algorithm>
 
 namespace netcoredbg
 {
@@ -29,7 +30,7 @@ void FuncBreakpoints::DeleteAll()
     m_breakpointsMutex.unlock();
 }
 
-HRESULT FuncBreakpoints::CheckBreakpointHit(IDebugger *debugger, ICorDebugThread *pThread, ICorDebugBreakpoint *pBreakpoint, Breakpoint &breakpoint)
+HRESULT FuncBreakpoints::CheckBreakpointHit(ICorDebugThread *pThread, ICorDebugBreakpoint *pBreakpoint, Breakpoint &breakpoint)
 {
     if (m_funcBreakpoints.empty())
         return S_FALSE; // Stopped at break, but no breakpoints.
@@ -82,10 +83,10 @@ HRESULT FuncBreakpoints::CheckBreakpointHit(IDebugger *debugger, ICorDebugThread
         if (!fbp.enabled || (!fbp.params.empty() && params != fbp.params))
             continue;
 
-        for (auto &iCorFuncBreakpoint : fbp.iCorFuncBreakpoints)
+        for (auto &funcBreakpoint : fbp.funcBreakpoints)
         {
-            if (FAILED(BreakpointUtils::IsSameFunctionBreakpoint(pFunctionBreakpoint, iCorFuncBreakpoint)) ||
-                FAILED(BreakpointUtils::IsEnableByCondition(fbp.condition, debugger, pThread)))
+            if (FAILED(BreakpointUtils::IsSameFunctionBreakpoint(pFunctionBreakpoint, funcBreakpoint.iCorFuncBreakpoint)) ||
+                FAILED(BreakpointUtils::IsEnableByCondition(fbp.condition, m_sharedVariables.get(), pThread)))
                 continue;
             
             ++fbp.times;
@@ -117,7 +118,7 @@ HRESULT FuncBreakpoints::ManagedCallbackLoadModule(ICorDebugModule *pModule, std
     return S_OK;
 }
 
-HRESULT FuncBreakpoints::SetFuncBreakpoints(ICorDebugProcess *pProcess, const std::vector<FuncBreakpoint> &funcBreakpoints,
+HRESULT FuncBreakpoints::SetFuncBreakpoints(bool haveProcess, const std::vector<FuncBreakpoint> &funcBreakpoints,
                                             std::vector<Breakpoint> &breakpoints, std::function<uint32_t()> getId)
 {
     std::lock_guard<std::mutex> lock(m_breakpointsMutex);
@@ -171,7 +172,7 @@ HRESULT FuncBreakpoints::SetFuncBreakpoints(ICorDebugProcess *pProcess, const st
             fbp.params = fb.params;
             fbp.condition = fb.condition;
 
-            if (pProcess)
+            if (haveProcess)
                 ResolveFuncBreakpoint(fbp);
 
             fbp.ToBreakpoint(breakpoint);
@@ -191,6 +192,61 @@ HRESULT FuncBreakpoints::SetFuncBreakpoints(ICorDebugProcess *pProcess, const st
     return S_OK;
 }
 
+HRESULT FuncBreakpoints::UpdateBreakpointsOnHotReload(ICorDebugModule *pModule, std::unordered_set<mdMethodDef> &methodTokens, std::vector<BreakpointEvent> &events)
+{
+    std::lock_guard<std::mutex> lock(m_breakpointsMutex);
+
+    HRESULT Status;
+
+    for (auto &funcBreakpoints : m_funcBreakpoints)
+    {
+        ManagedFuncBreakpoint &fbp = funcBreakpoints.second;
+        bool initiallyResolved = !fbp.funcBreakpoints.empty();
+
+        ResolvedFBP fbpResolved;
+        IfFailRet(m_sharedModules->ResolveFuncBreakpointInModule(
+            pModule, fbp.module, fbp.module_checked, fbp.name,
+            [&](ICorDebugModule *pModule, mdMethodDef &methodToken) -> HRESULT
+        {
+            // Note, in case Hot Reload we ignore "resolved" status + setup breakpoints for new/changed methods only.
+            if (methodTokens.find(methodToken) != methodTokens.end())
+                fbpResolved.emplace_back(std::make_pair(pModule, methodToken));
+
+            return S_OK;
+        }));
+
+        if (fbpResolved.empty() || FAILED(AddFuncBreakpoint(fbp, fbpResolved)))
+            continue;
+
+        // Remove breakpoints from old versions.
+        for (auto &entry : fbpResolved)
+        {
+            auto is_method = [&entry](ManagedFuncBreakpoint::internalFuncBreakpoint &ifb){return ifb.methodToken == entry.second;};
+            auto findIter = std::find_if(fbp.funcBreakpoints.rbegin(), fbp.funcBreakpoints.rend(), is_method);
+
+            mdMethodDef methodToken = findIter->methodToken;
+            ULONG32 methodVersion = findIter->methodVersion;
+            auto end_range = std::prev(fbp.funcBreakpoints.end(), fbpResolved.size()); // Skip added into list new/changed methods breakpoints.
+            for (auto it = fbp.funcBreakpoints.begin(); it != end_range;)
+            {
+                if (it->methodToken == methodToken && it->methodVersion != methodVersion)
+                    it = fbp.funcBreakpoints.erase(it);
+                else 
+                    ++it;
+            }
+        }
+
+        if (!initiallyResolved)
+        {
+            Breakpoint breakpoint;
+            fbp.ToBreakpoint(breakpoint);
+            events.emplace_back(BreakpointChanged, breakpoint);
+        }
+    }
+
+    return S_OK;
+}
+
 HRESULT FuncBreakpoints::AddFuncBreakpoint(ManagedFuncBreakpoint &fbp, ResolvedFBP &fbpResolved)
 {
     HRESULT Status;
@@ -201,23 +257,26 @@ HRESULT FuncBreakpoints::AddFuncBreakpoint(ManagedFuncBreakpoint &fbp, ResolvedF
         if (Status == S_OK) // S_FALSE - don't skip breakpoint
             return S_OK;
 
-        ULONG32 ilCloseOffset;
-        if (FAILED(m_sharedModules->GetNextSequencePointInMethod(entry.first, entry.second, 0, ilCloseOffset)))
-            return S_OK;
-
         ToRelease<ICorDebugFunction> pFunc;
         IfFailRet(entry.first->GetFunctionFromToken(entry.second, &pFunc));
+        ULONG32 currentVersion; // Note, new breakpoints could be setup for last code version only, since protocols (MI, VSCode, ...) provide method name (sig) only.
+        IfFailRet(pFunc->GetCurrentVersionNumber(&currentVersion));
+
+        ULONG32 ilNextOffset = 0;
+        if (FAILED(m_sharedModules->GetNextUserCodeILOffsetInMethod(entry.first, entry.second, currentVersion, 0, ilNextOffset)))
+            return S_OK;
+
         ToRelease<ICorDebugCode> pCode;
         IfFailRet(pFunc->GetILCode(&pCode));
 
         ToRelease<ICorDebugFunctionBreakpoint> iCorFuncBreakpoint;
-        IfFailRet(pCode->CreateBreakpoint(ilCloseOffset, &iCorFuncBreakpoint));
+        IfFailRet(pCode->CreateBreakpoint(ilNextOffset, &iCorFuncBreakpoint));
         IfFailRet(iCorFuncBreakpoint->Activate(fbp.enabled ? TRUE : FALSE));
 
         CORDB_ADDRESS modAddress;
         IfFailRet(entry.first->GetBaseAddress(&modAddress));
 
-        fbp.iCorFuncBreakpoints.emplace_back(iCorFuncBreakpoint.Detach());
+        fbp.funcBreakpoints.emplace_back(entry.second, currentVersion, iCorFuncBreakpoint.Detach());
     }
 
     return S_OK;
@@ -262,12 +321,12 @@ HRESULT FuncBreakpoints::AllBreakpointsActivate(bool act)
     HRESULT Status = S_OK;
     for (auto &fbp : m_funcBreakpoints)
     {
-        for (auto &iCorFuncBreakpoint : fbp.second.iCorFuncBreakpoints)
+        for (auto &funcBreakpoint : fbp.second.funcBreakpoints)
         {
-            if (!iCorFuncBreakpoint)
+            if (!funcBreakpoint.iCorFuncBreakpoint)
                 continue;
 
-            HRESULT ret = iCorFuncBreakpoint->Activate(act ? TRUE : FALSE);
+            HRESULT ret = funcBreakpoint.iCorFuncBreakpoint->Activate(act ? TRUE : FALSE);
             Status = FAILED(ret) ? ret : Status;
         }
         fbp.second.enabled = act;
@@ -286,12 +345,12 @@ HRESULT FuncBreakpoints::BreakpointActivate(uint32_t id, bool act)
             continue;
 
         HRESULT Status = S_OK;
-        for (auto &iCorFuncBreakpoint : fbp.second.iCorFuncBreakpoints)
+        for (auto &funcBreakpoint : fbp.second.funcBreakpoints)
         {
-            if (!iCorFuncBreakpoint)
+            if (!funcBreakpoint.iCorFuncBreakpoint)
                 continue;
 
-            HRESULT ret = iCorFuncBreakpoint->Activate(act ? TRUE : FALSE);
+            HRESULT ret = funcBreakpoint.iCorFuncBreakpoint->Activate(act ? TRUE : FALSE);
             Status = FAILED(ret) ? ret : Status;
         }
         fbp.second.enabled = act;

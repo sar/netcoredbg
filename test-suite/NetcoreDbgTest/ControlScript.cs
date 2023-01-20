@@ -50,6 +50,7 @@ namespace NetcoreDbgTestCore
 using System.IO;
 using System.Diagnostics;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using NetcoreDbgTest;
 using NetcoreDbgTest.Script;
 using Newtonsoft.Json;
@@ -198,6 +199,7 @@ namespace NetcoreDbgTestCore
 
         Compilation CompileTree(SyntaxTree tree)
         {
+            //var CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
             var compilation = CSharpCompilation.Create(
                 "ControlScript",
                 new SyntaxTree[] {tree},
@@ -283,6 +285,8 @@ namespace NetcoreDbgTestCore
                         id, new Tuple<string, InvocationExpressionSyntax>(next_id, node));
                     break;
             }
+
+            base.VisitInvocationExpression(node);
         }
 
         public TestLabelsInfo TestLabelsInfo;

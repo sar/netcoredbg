@@ -3,10 +3,8 @@
 # application name for tizens logger
 add_definitions(-DLOG_TAG="NETCOREDBG")
 
-if (NOT DBGSHIM_RUNTIME_DIR STREQUAL "")
-    add_definitions(-DDBGSHIM_RUNTIME_DIR="${DBGSHIM_RUNTIME_DIR}")
-else()
-    find_file(DBGSHIM_LOCATION NAMES dbgshim.dll libdbgshim.so libdbgshim.dylib PATHS "${DOTNET_DIR}/shared/Microsoft.NETCore.App/*" NO_DEFAULT_PATH)
+if (NOT DBGSHIM_DIR STREQUAL "")
+    add_definitions(-DDBGSHIM_DIR="${DBGSHIM_DIR}")
 endif()
 
 # Build corguids static library from coreclr source files
@@ -83,16 +81,19 @@ add_custom_command(
 set(netcoredbg_SRC
     debugger/breakpoint_break.cpp
     debugger/breakpoint_entry.cpp
+    debugger/breakpoint_hotreload.cpp
     debugger/breakpoints_exception.cpp
     debugger/breakpoints_func.cpp
     debugger/breakpoints_line.cpp
     debugger/breakpoints.cpp
     debugger/breakpointutils.cpp
     debugger/evalhelpers.cpp
+    debugger/evalstackmachine.cpp
     debugger/evaluator.cpp
     debugger/evalwaiter.cpp
     debugger/evalutils.cpp
     debugger/frames.cpp
+    debugger/hotreloadhelpers.cpp
     debugger/managedcallback.cpp
     debugger/manageddebugger.cpp
     debugger/threads.cpp
@@ -104,10 +105,15 @@ set(netcoredbg_SRC
     debugger/waitpid.cpp
     interfaces/types.cpp
     managed/interop.cpp
+    metadata/attributes.cpp
+    metadata/async_info.cpp
     metadata/jmc.cpp
     metadata/modules.cpp
+    metadata/modules_app_update.cpp
+    metadata/modules_sources.cpp
     metadata/typeprinter.cpp
     protocols/cliprotocol.cpp
+    protocols/escaped_string.cpp
     protocols/protocol_utils.cpp
     protocols/miprotocol.cpp
     protocols/tokenizer.cpp
@@ -117,20 +123,19 @@ set(netcoredbg_SRC
     errormessage.cpp
     main.cpp
     buildinfo.cpp
-    utils/escaped_string.cpp
+    utils/dynlibs_unix.cpp
+    utils/dynlibs_win32.cpp
     utils/filesystem.cpp
+    utils/filesystem_unix.cpp
+    utils/filesystem_win32.cpp
     utils/ioredirect.cpp
+    utils/iosystem_unix.cpp
+    utils/iosystem_win32.cpp
+    utils/interop_unix.cpp
+    utils/interop_win32.cpp
+    utils/platform_unix.cpp
+    utils/platform_win32.cpp
     utils/streams.cpp
-    unix/interop_unix.cpp
-    unix/dynlibs_unix.cpp
-    unix/filesystem_unix.cpp
-    unix/iosystem_unix.cpp
-    unix/platform_unix.cpp
-    windows/interop_win32.cpp
-    windows/dynlibs_win32.cpp
-    windows/filesystem_win32.cpp
-    windows/iosystem_win32.cpp
-    windows/platform_win32.cpp
     )
 
 set(CMAKE_INCLUDE_CURRENT_DIR OFF)
@@ -175,6 +180,10 @@ else()
     target_link_libraries(netcoredbg corguids dl pthread linenoise)
 endif()
 
+if (NCDB_DOTNET_STARTUP_HOOK)
+    add_definitions(-DNCDB_DOTNET_STARTUP_HOOK="${NCDB_DOTNET_STARTUP_HOOK}")
+endif (NCDB_DOTNET_STARTUP_HOOK)
+
 if (CLR_CMAKE_TARGET_TIZEN_LINUX)
     add_definitions(-DDEBUGGER_FOR_TIZEN)
     target_link_libraries(netcoredbg dlog)
@@ -189,9 +198,6 @@ add_custom_command(
 )
 
 install(TARGETS netcoredbg DESTINATION ${CMAKE_INSTALL_PREFIX})
-if (DBGSHIM_LOCATION)
-    install(FILES ${DBGSHIM_LOCATION} DESTINATION ${CMAKE_INSTALL_PREFIX})
-endif()
 
 # Build managed part of the debugger (ManagedPart.dll)
 
@@ -202,10 +208,33 @@ if (BUILD_MANAGED)
 
     find_program(DOTNETCLI dotnet PATHS "${DOTNET_DIR}" ENV PATH NO_DEFAULT_PATH)
 
+    if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+        set(MANAGEDPART_BUILD_TYPE "Debug")
+    else() # CMAKE_BUILD_TYPE not set or Release, RelWithDebInfo, MinSizeRel, ...
+        set(MANAGEDPART_BUILD_TYPE "Release")
+    endif()
+
+    set(USE_DBGSHIM_DEPENDENCY "")
+    if (DBGSHIM_DIR STREQUAL "")
+        set(USE_DBGSHIM_DEPENDENCY "/p:UseDbgShimDependency=true")
+    endif()
+
+    if (CLR_CMAKE_PLATFORM_UNIX)
+        if (CLR_CMAKE_PLATFORM_DARWIN)
+            set(RID_NAME "osx")
+        else()
+            set(RID_NAME "linux")
+        endif()
+    elseif (WIN32)
+        set(RID_NAME "win")
+    else()
+        message(FATAL_ERROR "Unsupported platform")
+    endif()
+
     add_custom_command(OUTPUT ${DOTNET_BUILD_RESULT}
-      COMMAND ${DOTNETCLI} publish ${MANAGEDPART_PROJECT} -o ${CMAKE_CURRENT_BINARY_DIR} /p:BaseIntermediateOutputPath=${CMAKE_CURRENT_BINARY_DIR}/obj/ /p:BaseOutputPath=${CMAKE_CURRENT_BINARY_DIR}/bin/
+      COMMAND ${DOTNETCLI} publish ${MANAGEDPART_PROJECT} -r ${RID_NAME}-${CLR_CMAKE_TARGET_ARCH} --self-contained -c ${MANAGEDPART_BUILD_TYPE} -o ${CMAKE_CURRENT_BINARY_DIR} /p:BaseIntermediateOutputPath=${CMAKE_CURRENT_BINARY_DIR}/obj/ /p:BaseOutputPath=${CMAKE_CURRENT_BINARY_DIR}/bin/ ${USE_DBGSHIM_DEPENDENCY}
       WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
-      DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/managed/SymbolReader.cs" "${MANAGEDPART_PROJECT}"
+      DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/managed/*.cs" "${MANAGEDPART_PROJECT}"
       COMMENT "Compiling ${MANAGEDPART_DLL_NAME}"
       VERBATIM
     )
@@ -225,6 +254,46 @@ if (BUILD_MANAGED)
     endforeach()
 
     install(FILES ${DLLS_TO_DEPLOY} DESTINATION ${CMAKE_INSTALL_PREFIX})
+
+    if (DBGSHIM_DIR STREQUAL "")
+        if (CLR_CMAKE_PLATFORM_UNIX)
+            if (CLR_CMAKE_PLATFORM_DARWIN)
+                set(DBGSHIM_LIB_NAME "libdbgshim.dylib")
+            else()
+                set(DBGSHIM_LIB_NAME "libdbgshim.so")
+            endif()
+        elseif (WIN32)
+            set(DBGSHIM_LIB_NAME "dbgshim.dll")
+        else()
+            message(FATAL_ERROR "Unsupported platform")
+        endif()
+
+        install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${DBGSHIM_LIB_NAME} DESTINATION ${CMAKE_INSTALL_PREFIX})
+    endif()
+endif()
+
+# Build Hot Reload managed dll (ncdbhook.dll)
+
+if (BUILD_MANAGED AND NCDB_DOTNET_STARTUP_HOOK)
+    set(NCDBHOOK_PROJECT ${CMAKE_CURRENT_SOURCE_DIR}/ncdbhook/ncdbhook.csproj)
+    set(NCDBHOOK_DLL_NAME ncdbhook.dll)
+    set(NCDBHOOK_DOTNET_BUILD_RESULT ${CMAKE_CURRENT_BINARY_DIR}/${NCDBHOOK_DLL_NAME})
+    set(NCDB_HOOK_TargetFramework "net6.0")
+
+    find_program(DOTNETCLI dotnet PATHS "${DOTNET_DIR}" ENV PATH NO_DEFAULT_PATH)
+
+    # Build Debug only, code must be not optimized.
+    add_custom_command(OUTPUT ${NCDBHOOK_DOTNET_BUILD_RESULT}
+      COMMAND NCDB_HOOK_TargetFramework=${NCDB_HOOK_TargetFramework} ${DOTNETCLI} publish ${NCDBHOOK_PROJECT} -c Debug -o ${CMAKE_CURRENT_BINARY_DIR} /p:BaseIntermediateOutputPath=${CMAKE_CURRENT_BINARY_DIR}/obj/ /p:BaseOutputPath=${CMAKE_CURRENT_BINARY_DIR}/bin/
+      WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+      DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/ncdbhook/*.cs" "${NCDBHOOK_PROJECT}"
+      COMMENT "Compiling ${NCDBHOOK_DLL_NAME}"
+      VERBATIM
+    )
+
+    add_custom_target(ncdbhook_dll ALL DEPENDS ${NCDBHOOK_DOTNET_BUILD_RESULT})
+
+    install(FILES ${NCDBHOOK_DOTNET_BUILD_RESULT} DESTINATION ${CMAKE_INSTALL_PREFIX})
 endif()
 
 # documentation

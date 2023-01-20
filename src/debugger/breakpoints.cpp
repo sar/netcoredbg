@@ -7,6 +7,7 @@
 #include "debugger/breakpoints_exception.h"
 #include "debugger/breakpoints_func.h"
 #include "debugger/breakpoints_line.h"
+#include "debugger/breakpoint_hotreload.h"
 #include "debugger/breakpoints.h"
 #include "debugger/breakpointutils.h"
 
@@ -56,6 +57,7 @@ void Breakpoints::DeleteAll()
     m_uniqueFuncBreakpoints->DeleteAll();
     m_uniqueLineBreakpoints->DeleteAll();
     m_uniqueExceptionBreakpoints->DeleteAll();
+    m_uniqueHotReloadBreakpoint->Delete();
 }
 
 HRESULT Breakpoints::DisableAll(ICorDebugProcess *pProcess)
@@ -85,19 +87,18 @@ HRESULT Breakpoints::DisableAll(ICorDebugProcess *pProcess)
     return S_OK;
 }
 
-HRESULT Breakpoints::SetFuncBreakpoints(ICorDebugProcess *pProcess, const std::vector<FuncBreakpoint> &funcBreakpoints, std::vector<Breakpoint> &breakpoints)
+HRESULT Breakpoints::SetFuncBreakpoints(bool haveProcess, const std::vector<FuncBreakpoint> &funcBreakpoints, std::vector<Breakpoint> &breakpoints)
 {
-    return m_uniqueFuncBreakpoints->SetFuncBreakpoints(pProcess, funcBreakpoints, breakpoints, [&]() -> uint32_t
+    return m_uniqueFuncBreakpoints->SetFuncBreakpoints(haveProcess, funcBreakpoints, breakpoints, [&]() -> uint32_t
     {
         std::lock_guard<std::mutex> lock(m_nextBreakpointIdMutex);
         return m_nextBreakpointId++;
     });
 }
 
-HRESULT Breakpoints::SetLineBreakpoints(ICorDebugProcess *pProcess, const std::string& filename,
-                                        const std::vector<LineBreakpoint> &lineBreakpoints, std::vector<Breakpoint> &breakpoints)
+HRESULT Breakpoints::SetLineBreakpoints(bool haveProcess, const std::string& filename, const std::vector<LineBreakpoint> &lineBreakpoints, std::vector<Breakpoint> &breakpoints)
 {
-    return m_uniqueLineBreakpoints->SetLineBreakpoints(pProcess, filename, lineBreakpoints, breakpoints, [&]() -> uint32_t
+    return m_uniqueLineBreakpoints->SetLineBreakpoints(haveProcess, filename, lineBreakpoints, breakpoints, [&]() -> uint32_t
     {
         std::lock_guard<std::mutex> lock(m_nextBreakpointIdMutex);
         return m_nextBreakpointId++;
@@ -113,12 +114,19 @@ HRESULT Breakpoints::SetExceptionBreakpoints(const std::vector<ExceptionBreakpoi
     });
 }
 
+HRESULT Breakpoints::UpdateBreakpointsOnHotReload(ICorDebugModule *pModule, std::unordered_set<mdMethodDef> &methodTokens, std::vector<BreakpointEvent> &events)
+{
+    m_uniqueFuncBreakpoints->UpdateBreakpointsOnHotReload(pModule, methodTokens, events);
+    m_uniqueLineBreakpoints->UpdateBreakpointsOnHotReload(pModule, methodTokens, events);
+    return S_OK;
+}
+
 HRESULT Breakpoints::GetExceptionInfo(ICorDebugThread *pThread, ExceptionInfo &exceptionInfo)
 {
     return m_uniqueExceptionBreakpoints->GetExceptionInfo(pThread, exceptionInfo);
 }
 
-HRESULT Breakpoints::ManagedCallbackBreakpoint(IDebugger *debugger, ICorDebugThread *pThread, ICorDebugBreakpoint *pBreakpoint, Breakpoint &breakpoint, bool &atEntry)
+HRESULT Breakpoints::ManagedCallbackBreakpoint(ICorDebugThread *pThread, ICorDebugBreakpoint *pBreakpoint, Breakpoint &breakpoint, bool &atEntry)
 {
     // CheckBreakpointHit return:
     //     S_OK - breakpoint hit
@@ -136,13 +144,28 @@ HRESULT Breakpoints::ManagedCallbackBreakpoint(IDebugger *debugger, ICorDebugThr
         return S_FALSE; // S_FALSE - not affect on callback (callback will emit stop event)
     }
 
-    if (SUCCEEDED(Status = m_uniqueLineBreakpoints->CheckBreakpointHit(debugger, pThread, pBreakpoint, breakpoint)) &&
+    // Don't stop at breakpoint in not JMC code, if possible (error here is not fatal for debug process).
+    // We need this check here, since we can't guarantee this check in SkipBreakpoint().
+    ToRelease<ICorDebugFrame> iCorFrame;
+    ToRelease<ICorDebugFunction> iCorFunction;
+    ToRelease<ICorDebugFunction2> iCorFunction2;
+    BOOL JMCStatus;
+    if (SUCCEEDED(pThread->GetActiveFrame(&iCorFrame)) && iCorFrame != nullptr &&
+        SUCCEEDED(iCorFrame->GetFunction(&iCorFunction)) &&
+        SUCCEEDED(iCorFunction->QueryInterface(IID_ICorDebugFunction2, (LPVOID*) &iCorFunction2)) &&
+        SUCCEEDED(iCorFunction2->GetJMCStatus(&JMCStatus)) &&
+        JMCStatus == FALSE)
+    {
+        return S_OK; // forced to interrupt this callback (breakpoint in not user code, continue process execution)
+    }
+
+    if (SUCCEEDED(Status = m_uniqueLineBreakpoints->CheckBreakpointHit(pThread, pBreakpoint, breakpoint)) &&
         Status == S_OK) // S_FALSE - no breakpoint hit
     {
         return S_FALSE; // S_FALSE - not affect on callback (callback will emit stop event)
     }
 
-    if (SUCCEEDED(Status = m_uniqueFuncBreakpoints->CheckBreakpointHit(debugger, pThread, pBreakpoint, breakpoint)) &&
+    if (SUCCEEDED(Status = m_uniqueFuncBreakpoints->CheckBreakpointHit(pThread, pBreakpoint, breakpoint)) &&
         Status == S_OK) // S_FALSE - no breakpoint hit
     {
         return S_FALSE; // S_FALSE - not affect on callback (callback will emit stop event)
@@ -156,6 +179,12 @@ HRESULT Breakpoints::ManagedCallbackLoadModule(ICorDebugModule *pModule, std::ve
     m_uniqueEntryBreakpoint->ManagedCallbackLoadModule(pModule);
     m_uniqueFuncBreakpoints->ManagedCallbackLoadModule(pModule, events);
     m_uniqueLineBreakpoints->ManagedCallbackLoadModule(pModule, events);
+    return S_OK;
+}
+
+HRESULT Breakpoints::ManagedCallbackLoadModuleAll(ICorDebugModule *pModule)
+{
+    m_uniqueHotReloadBreakpoint->ManagedCallbackLoadModuleAll(pModule);
     return S_OK;
 }
 
@@ -186,9 +215,13 @@ void Breakpoints::EnumerateBreakpoints(std::function<bool (const IDebugger::Brea
     std::vector<IDebugger::BreakpointInfo> list;
     m_uniqueLineBreakpoints->AddAllBreakpointsInfo(list);
     m_uniqueFuncBreakpoints->AddAllBreakpointsInfo(list);
+    m_uniqueExceptionBreakpoints->AddAllBreakpointsInfo(list);
 
     // sort breakpoint list by ascending order, preserve order of elements with same number
     std::stable_sort(list.begin(), list.end());
+
+    // remove duplicates (ones from m_lineBreakpointMapping which have resolved pair in m_lineResolvedBreakpoints)
+    list.erase(std::unique(list.begin(), list.end()), list.end());
 
     for (const auto &item : list)
     {
@@ -201,6 +234,21 @@ void Breakpoints::EnumerateBreakpoints(std::function<bool (const IDebugger::Brea
 HRESULT Breakpoints::ManagedCallbackExitThread(ICorDebugThread *pThread)
 {
     return m_uniqueExceptionBreakpoints->ManagedCallbackExitThread(pThread);
+}
+
+HRESULT Breakpoints::CheckApplicationReload(ICorDebugThread *pThread, ICorDebugBreakpoint *pBreakpoint)
+{
+    return m_uniqueHotReloadBreakpoint->CheckApplicationReload(pThread, pBreakpoint);
+}
+
+void Breakpoints::CheckApplicationReload(ICorDebugThread *pThread)
+{
+    m_uniqueHotReloadBreakpoint->CheckApplicationReload(pThread);
+}
+
+HRESULT Breakpoints::SetHotReloadBreakpoint(const std::string &updatedDLL, const std::unordered_set<mdTypeDef> &updatedTypeTokens)
+{
+    return m_uniqueHotReloadBreakpoint->SetHotReloadBreakpoint(updatedDLL, updatedTypeTokens);
 }
 
 } // namespace netcoredbg

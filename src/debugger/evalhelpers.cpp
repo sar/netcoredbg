@@ -90,7 +90,7 @@ HRESULT EvalHelpers::EvalFunction(
             HRESULT Status;
             ToRelease<ICorDebugEval2> pEval2;
             IfFailRet(pEval->QueryInterface(IID_ICorDebugEval2, (LPVOID*) &pEval2));
-            IfFailRet(Status = pEval2->CallParameterizedFunction(
+            IfFailRet(pEval2->CallParameterizedFunction(
                 pFunc,
                 static_cast<uint32_t>(typeParams.size()),
                 (ICorDebugType **)typeParams.data(),
@@ -110,10 +110,7 @@ static HRESULT GetMethodToken(IMetaDataImport *pMD, mdTypeDef cl, const WCHAR *m
     return methodDef;
 }
 
-static HRESULT FindFunction(ICorDebugModule *pModule,
-                            const WCHAR *typeName,
-                            const WCHAR *methodName,
-                            ICorDebugFunction **ppFunction)
+HRESULT FindFunction(ICorDebugModule *pModule, const WCHAR *typeName, const WCHAR *methodName, ICorDebugFunction **ppFunction)
 {
     HRESULT Status;
 
@@ -132,6 +129,15 @@ static HRESULT FindFunction(ICorDebugModule *pModule,
         return E_FAIL;
 
     return pModule->GetFunctionFromToken(methodDef, ppFunction);
+}
+
+HRESULT EvalHelpers::FindMethodInModule(const std::string &moduleName, const WCHAR className[], const WCHAR methodName[], ICorDebugFunction **ppFunction)
+{
+    HRESULT Status;
+    ToRelease<ICorDebugModule> pModule;
+    IfFailRet(m_sharedModules->GetModuleWithName(moduleName, &pModule));
+    IfFailRet(FindFunction(pModule, className, methodName, ppFunction));
+    return S_OK;
 }
 
 static bool TypeHaveStaticMembers(ICorDebugType *pType)
@@ -327,12 +333,10 @@ HRESULT EvalHelpers::CreatTypeObjectStaticConstructor(
 
         if (!m_pSuppressFinalize)
         {
-            ToRelease<ICorDebugModule> pModule;
-            IfFailRet(m_sharedModules->GetModuleWithName("System.Private.CoreLib.dll", &pModule));
-
+            static const std::string assemblyName = "System.Private.CoreLib.dll";
             static const WCHAR gcName[] = W("System.GC");
             static const WCHAR suppressFinalizeMethodName[] = W("SuppressFinalize");
-            IfFailRet(FindFunction(pModule, gcName, suppressFinalizeMethodName, &m_pSuppressFinalize));
+            IfFailRet(FindMethodInModule(assemblyName, gcName, suppressFinalizeMethodName, &m_pSuppressFinalize));
         }
 
         if (!m_pSuppressFinalize)

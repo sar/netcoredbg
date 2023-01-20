@@ -13,6 +13,7 @@
 #include <memory>
 #include <atomic>
 
+#include "protocols/protocol_utils.h"
 #include "interfaces/iprotocol.h"
 #include "utils/string_view.h"
 #include "utils/streams.h"
@@ -56,14 +57,11 @@ class CLIProtocol : public IProtocol
     std::string m_fileExec;
     std::vector<std::string> m_execArgs;
 
-    std::unordered_map<std::string, std::unordered_map<uint32_t, LineBreakpoint> > m_lineBreakpoints;
-    std::unordered_map<uint32_t, FuncBreakpoint> m_funcBreakpoints;
-
-    FrameId m_frameId;
+    BreakpointsHandle m_breakpointsHandle;
     std::string m_sourcePath;
-    std::string m_sourceFile;
     int m_sourceLine;
     int m_listSize;
+    int m_stoppedAt;
     std::unique_ptr<SourceStorage> m_sources;
 
     // Functor which is called when UI repaint required.
@@ -81,6 +79,7 @@ class CLIProtocol : public IProtocol
     int printf_checked(const char *fmt, ...);
 
     static HRESULT PrintBreakpoint(const Breakpoint &b, std::string &output);
+    static HRESULT PrintExceptionBPs(const std::vector<Breakpoint> &breakpoints, size_t bpCnt, std::string &outStr, const std::string &filter);
     
 public:
     CLIProtocol(InStream& input, OutStream& output);
@@ -89,7 +88,7 @@ public:
     void EmitExecEvent(PID, const std::string& argv) override {}
     void EmitStoppedEvent(const StoppedEvent &event) override;
     void EmitExitedEvent(const ExitedEvent &event) override;
-    void EmitTerminatedEvent() override {}
+    void EmitTerminatedEvent() override;
     void EmitContinuedEvent(ThreadId threadId) override;
     void EmitThreadEvent(const ThreadEvent &event) override;
     void EmitModuleEvent(const ModuleEvent &event) override;
@@ -178,11 +177,7 @@ private:
                         std::string &output,
                         IDebugger::StepType stepType);
     HRESULT PrintFrames(ThreadId threadId, std::string &output, FrameLevel lowFrame, FrameLevel highFrame);
-    HRESULT SetLineBreakpoint(const std::string &module, const std::string &filename, int linenum, const std::string &condition, Breakpoint &breakpoints);
-    HRESULT SetFuncBreakpoint(const std::string &module, const std::string &funcname, const std::string &params, const std::string &condition, Breakpoint &breakpoint);
     HRESULT PrintVariable(const Variable &v, std::ostringstream &output, bool expand, bool is_static);
-    void DeleteLineBreakpoints(const std::unordered_set<uint32_t> &ids);
-    void DeleteFuncBreakpoints(const std::unordered_set<uint32_t> &ids);
     static HRESULT PrintFrameLocation(const StackFrame &stackFrame, std::string &output);
     bool ParseLine(const std::string &str, std::string &token, std::string &cmd, std::vector<std::string> &args);
 
@@ -202,9 +197,13 @@ public:
         // This function reads next line (LineReader retain ownership
         // of just read line till next call to get_line).
         virtual std::tuple<string_view, Result> get_line(const char *prompt) = 0;
+        virtual void setLastCommand(std::string lc) {}
 
         virtual ~LineReader() {}
     };
+
+    // pause debugee execution
+    void Pause();
 
 private:
     // This function should be used by any others CLIProtocol's functions
@@ -213,7 +212,7 @@ private:
 
     // This function interprets commands from the input till reaching Eof or Error.
     // Function returns E_FAIL in case of input error.
-    HRESULT execCommands(LineReader&&);
+    HRESULT execCommands(LineReader&&, bool printCommands = false);
 
     // update screen (after asynchronous message printed)
     void repaint();
@@ -232,15 +231,15 @@ private:
     static CLIProtocol* g_console_owner;
     static std::mutex g_console_mutex; // mutex which protect g_console_owner
 
-    // pause debugee execution
-    void Pause();
-
     // process Ctrl-C events
     static void interruptHandler();
 
     // remove/set Ctrl-C handlers
     void removeInterruptHandler();
     void setupInterruptHandler();
+
+    void resetConsole();
+    void cleanupConsoleInputBuffer();
 };
 
 } // namespace netcoredbg

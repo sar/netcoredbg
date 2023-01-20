@@ -153,11 +153,12 @@ static HRESULT TrySetupAsyncEntryBreakpoint(ICorDebugModule *pModule, IMetaDataI
         return E_FAIL;
 
     // Note, in case of async `MoveNext` method, user code don't start from 0 IL offset.
-    ULONG32 ilCloseOffset;
-    IfFailRet(pModules->GetNextSequencePointInMethod(pModule, resultToken, 0, ilCloseOffset));
+    ULONG32 ilNextOffset = 0;
+    const ULONG32 currentVersion = 1; // In case entry breakpoint, this can be only base PDB, not delta PDB for sure.
+    IfFailRet(pModules->GetNextUserCodeILOffsetInMethod(pModule, resultToken, currentVersion, 0, ilNextOffset));
 
     entryPointToken = resultToken;
-    entryPointOffset = ilCloseOffset;
+    entryPointOffset = ilNextOffset;
     return S_OK;
 }
 
@@ -169,7 +170,7 @@ HRESULT EntryBreakpoint::ManagedCallbackLoadModule(ICorDebugModule *pModule)
         return S_FALSE;
 
     HRESULT Status;
-    mdMethodDef entryPointToken = GetEntryPointTokenFromFile(Modules::GetModuleFileName(pModule));
+    mdMethodDef entryPointToken = GetEntryPointTokenFromFile(GetModuleFileName(pModule));
     // Note, by some reason, in CoreCLR 6.0 System.Private.CoreLib.dll have Token "0" as entry point RVA.
     if (entryPointToken == mdMethodDefNil ||
         TypeFromToken(entryPointToken) != mdtMethodDef)

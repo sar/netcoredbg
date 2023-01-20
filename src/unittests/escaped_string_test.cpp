@@ -4,7 +4,7 @@
 #include <catch2/catch.hpp>
 #include <string>
 #include "utils/string_view.h"
-#include "utils/escaped_string.h"
+#include "protocols/escaped_string.h"
 #include "compile_test.h"
 
 using namespace netcoredbg;
@@ -13,12 +13,14 @@ using string_view = Utility::string_view;
 struct EscapeRules
 {
     static const char forbidden_chars[];
-    static const char subst_chars[];
+    static const string_view subst_chars[];
     static const char constexpr escape_char = '\\';
 };
 
 const char EscapeRules::forbidden_chars[] = "\"\\\0\a\b\f\n\r\t\v";
-const char EscapeRules::subst_chars[] = "\"\\0abfnrtv";
+const string_view EscapeRules::subst_chars[] {
+    "\\\"", "\\\\", "\\0", "\\a", "\\b", "\\f", "\\n", "\\r", "\\t", "\\v"
+};
 
 using ES = EscapedString<EscapeRules>;
 

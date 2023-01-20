@@ -9,6 +9,9 @@ command line (like as GDB).
 
 You can find licensing information in file [LICENSE](LICENSE), in root directory of Netcoredbg sources.
 
+## Usage
+More details about usage of NCDB you can find in [CLI](docs/cli.md) manual.
+
 
 ## Building from source code
 
@@ -31,12 +34,11 @@ Building of Netcoredbg requires Microsoft's .NET, so currently you can build Net
 
 5. It is expected, that Netcoredbg sources placed to some directory;
 
-6. Optional step: Netcoredbg requires **Core CLR runtime source code**, which is typically downloaded automatically, but you can download it from here: https://github.com/dotnet/coreclr
+6. Optional step: Netcoredbg requires **CoreCLR runtime source code**, which is typically downloaded automatically, but you can download it from here: https://github.com/dotnet/runtime
 
-   You should check out tag v3.x.
+   You should check out tag v7.x.
 
 7. Optional step: Netcoredbg requires **.NET SDK**, which can be downloaded automatically, but you can download it manually from here: https://dotnet.microsoft.com/download
-   You need .NET SDK 3.1.
 
 #### Compiling
 
@@ -50,9 +52,9 @@ user@build$ CC=clang CXX=clang++ cmake ..
 
 For running tests after build has succeed you need to add option `-DCMAKE_INSTALL_PREFIX=$PWD/../bin`.
 
-If you have previously downloaded .NET SDK or Core CLR sources, then you should modify command line and add following options: `-DDOTNET_DIR=/path/to/sdk/dir -DCORECLR_DIR=/path/to/coreclr/sources`
+If you have previously downloaded .NET SDK or CoreCLR sources, then you should modify command line and add following options: `-DDOTNET_DIR=/path/to/sdk/dir -DCORECLR_DIR=/path/to/coreclr/sources`
 
-If cmake tries to download .NET SDK or Core CLR sources and fails -- see bullets 6 and 7 above. You can download required files manually.
+If cmake tries to download .NET SDK or CoreCLR sources and fails -- see bullets 6 and 7 above. You can download required files manually.
 
 After configuration has finished, you can build Netcoredbg:
 
@@ -100,12 +102,12 @@ After this, build instructions are same as for Unix (including prerequisites).
 
 
 5. This step might be omitted, in this case cmake automatically downloads necessary files.
-   But if it fails, you should then checkout **Core CLR sources** to another directory from here: https://github.com/dotnet/coreclr
+   But if it fails, you should then checkout **CoreCLR sources** to another directory from here: https://github.com/dotnet/runtime
 
-   You need latest tag **v3.x**.
+   You need latest tag **v7.x**.
 
 6. This step might be omitted too, and cmake will automatically downloads that it needs.
-   But in case of failure you need download and install **.NET Core 3.1 SDK** from here: https://dotnet.microsoft.com/download
+   But in case of failure you need download and install **.NET SDK** from here: https://dotnet.microsoft.com/download
 
 #### Compiling
 
@@ -180,14 +182,14 @@ Options:
 
 Basically, to debug .NET code you should run Netcoredbg with the following command line:
 ```
-$ /path/to/netcoredbg --interpreter=TYPE -- /path/to/corerun /path/to/program.dll
+$ /path/to/netcoredbg --interpreter=TYPE -- /path/to/dotnet /path/to/program.dll
 ```
 
 ## Notes for developers
 
 ### Running the tests
 
-You can find detailed instruction how to run tests in `test-suite` directory, see [test-suite/README.md](test-suite/REDME.md).
+You can find detailed instruction how to run tests in `test-suite` directory, see [test-suite/README.md](test-suite/README.md).
 Basically you just need to build and install Netcoredbg into `bin` directory (in Netcoredbg source tree) and then change directory to `test-suite` and run script `/run_tests.sh`
 
 
